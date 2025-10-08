@@ -1,4 +1,4 @@
-# camera_base
+# CameraBase
 
 No description provided
 
