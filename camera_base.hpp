@@ -120,6 +120,15 @@ class CameraBase
     } rational14;  ///< 14
 
     DistortionCoeffs() : raw{} {}  ///< 零初始化并激活 raw 成员。
+
+    DistortionCoeffs(std::initializer_list<double> init)
+    {
+      ASSERT(init.size() <= 14);
+      for (size_t i = 0; i < init.size(); i++)
+      {
+        raw[i] = init.begin()[i];
+      }
+    }
   };
   static_assert(sizeof(DistortionCoeffs) == sizeof(std::array<double, 14>),
                 "overlay size mismatch");
@@ -157,16 +166,6 @@ class CameraBase
     //        0  fy' cy'  Ty ;
     //        0   0   1    0 ]
     std::array<double, 12> projection_matrix;
-
-    // 默认构造：安全零/单位初始化
-    CameraInfo()
-        : timestamp{},
-          camera_matrix{{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}},
-          distortion_coefficients{},
-          rectification_matrix{{1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0}},
-          projection_matrix{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}
-    {
-    }
 
     static inline std::vector<double> ToPnPDistCoeffs(
         CameraBase::DistortionModel model, const CameraBase::DistortionCoeffs& D)
@@ -209,22 +208,4 @@ class CameraBase
       return dc;
     }
   };
-};
-
-/**
- * @class CameraBaseModule
- * @brief 将 CameraBase 类型打包为一个可被框架装载的“空行为”模块。
- *
- * 该模块不占用硬件与任务，仅用于通过 App 框架的模块化装配与依赖管理。
- */
-class CameraBaseModule : public LibXR::Application
-{
- public:
-  CameraBaseModule(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app)
-  {
-    UNUSED(hw);
-    UNUSED(app);
-  }
-
-  void OnMonitor() override {}
 };
