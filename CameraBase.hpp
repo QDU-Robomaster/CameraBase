@@ -12,6 +12,8 @@ depends: []
 
 #include "app_framework.hpp"
 #include "libxr.hpp"
+#include "libxr_rw.hpp"
+#include "ramfs.hpp"
 
 // STL
 #include <array>
@@ -208,4 +210,45 @@ class CameraBase
       return dc;
     }
   };
+
+  CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera")
+      : name_(name), cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this))
+  {
+    hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+  }
+
+  virtual void SetExposure(double exposure) = 0;
+
+  virtual void SetGain(double gain) = 0;
+
+  static int CommandFun(CameraBase* self, int argc, char** argv)
+  {
+    if (argc == 1)
+    {
+      LibXR::STDIO::Printf("Camera: %s\n\n", self->name_);
+      LibXR::STDIO::Printf("Usage:\r\n");
+      LibXR::STDIO::Printf("  set_exposure <exposure>\r\n");
+      LibXR::STDIO::Printf("  set_gain <gain>\r\n");
+      return 0;
+    }
+    else if (argc == 3)
+    {
+      if (strcmp(argv[1], "set_exposure") == 0)
+      {
+        self->SetExposure(atof(argv[2]));
+        return 0;
+      }
+      else if (strcmp(argv[1], "set_gain") == 0)
+      {
+        self->SetGain(atof(argv[2]));
+        return 0;
+      }
+    }
+
+    LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
+    return -1;
+  }
+
+  const char* name_;
+  LibXR::RamFS::File cmd_file_;
 };
