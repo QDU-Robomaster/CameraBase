@@ -11,8 +11,9 @@ depends: []
 // clang-format on
 
 #include "app_framework.hpp"
-#include "libxr.hpp"
 #include "libxr_rw.hpp"
+#include "libxr_time.hpp"
+#include "logger.hpp"
 #include "ramfs.hpp"
 
 // STL
@@ -59,7 +60,7 @@ class CameraBase
     BAYER_GBRG16,  ///< 16 位 Bayer RAW，排列 GBRG。
     BAYER_BGGR16,  ///< 16 位 Bayer RAW，排列 BGGR。
     YUV422         ///< 打包 YUV 4:2:2（常见布局
-            ///< YUYV/UYVY）。如需精确到子格式，请在协议层另行注明。
+                   ///< YUYV/UYVY）。如需精确到子格式，请在协议层另行注明。
   };
 
   /**
@@ -147,9 +148,9 @@ class CameraBase
   struct CameraInfo
   {
     // 基本图像信息
-    uint32_t width{};   ///< 图像宽度（像素）。
-    uint32_t height{};  ///< 图像高度（像素）。
-    uint32_t step{};    ///< 每行字节数（bytes per row / stride）。
+    uint32_t width{};                         ///< 图像宽度（像素）。
+    uint32_t height{};                        ///< 图像高度（像素）。
+    uint32_t step{};                          ///< 每行字节数（bytes per row / stride）。
     LibXR::MicrosecondTimestamp timestamp{};  ///< 采集时间戳（微秒）。
     Encoding encoding{};                      ///< 像素编码类型。
 
@@ -247,6 +248,11 @@ class CameraBase
 
     LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
     return -1;
+  }
+
+  static int CommandAdapter(void* instance, int argc, char** argv)
+  {
+    return CommandFun(static_cast<CameraBase*>(instance), argc, argv);
   }
 
   const char* name_;
