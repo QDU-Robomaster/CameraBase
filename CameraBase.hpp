@@ -15,6 +15,7 @@ depends: []
 #include "libxr_time.hpp"
 #include "logger.hpp"
 #include "ramfs.hpp"
+#include "transform.hpp"
 
 // STL
 #include <array>
@@ -145,6 +146,13 @@ class CameraBase
    * 字段顺序与常见相机模型表达一致：
    * 1) 内参矩阵 K；2) 畸变模型与参数；3) 矫正旋转 R；4) 投影矩阵 P。
    */
+  struct PoseStamped
+  {
+    LibXR::MicrosecondTimestamp timestamp{};
+    LibXR::Quaternion<float> rotation{};
+    LibXR::Position<float> translation{};
+  };
+
   struct CameraInfo
   {
     // 基本图像信息
