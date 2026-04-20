@@ -30,7 +30,8 @@ depends: []
  * 说明：
  * - 像素编码与 ROS `sensor_msgs/Image.encoding` 的命名/含义保持一致或可直观映射。
  * - 所有矩阵按 **行优先（Row-major）** 存储。
- * - `step` 为每行字节数（stride, bytes per row），**不是每像素字节数**。
+ * - `step` 为固定输出模式下的每行字节数（stride, bytes per row），**不是每像素字节数**。
+ * - 帧级时间戳等动态元数据不放在 `CameraInfo` 中，而由独立帧头承载。
  */
 class CameraBase
 {
@@ -140,8 +141,31 @@ class CameraBase
                 "overlay align mismatch");
 
   /**
+   * @struct StaticInfo
+   * @brief 可作为项目级 `constexpr` 使用的静态相机信息载体。
+   *
+   * 设计目标：
+   * - 仅保留结构化字段，便于作为非类型模板参数（NTTP）；
+   * - 由 XRobot 生成 `inline constexpr` 项目常量；
+   * - 若仍需发布 `camera_info` topic，再转换为运行时 @ref CameraInfo。
+   */
+  struct StaticInfo
+  {
+    uint32_t width{};
+    uint32_t height{};
+    uint32_t step{};
+    Encoding encoding{};
+    std::array<double, 9> camera_matrix{};
+    DistortionModel distortion_model{};
+    std::array<double, 14> distortion_coefficients{};
+    std::array<double, 9> rectification_matrix{};
+    std::array<double, 12> projection_matrix{};
+  };
+
+
+  /**
    * @struct CameraInfo
-   * @brief 图像尺寸、时间戳、编码与标定信息。
+   * @brief 静态图像尺寸、编码与标定信息。
    *
    * 字段顺序与常见相机模型表达一致：
    * 1) 内参矩阵 K；2) 畸变模型与参数；3) 矫正旋转 R；4) 投影矩阵 P。
@@ -153,13 +177,18 @@ class CameraBase
     LibXR::Position<float> translation{};
   };
 
+  struct ImageHeader
+  {
+    LibXR::MicrosecondTimestamp timestamp{};
+    uint64_t sequence{};
+  };
+
   struct CameraInfo
   {
     // 基本图像信息
     uint32_t width{};                         ///< 图像宽度（像素）。
     uint32_t height{};                        ///< 图像高度（像素）。
     uint32_t step{};                          ///< 每行字节数（bytes per row / stride）。
-    LibXR::MicrosecondTimestamp timestamp{};  ///< 采集时间戳（微秒）。
     Encoding encoding{};                      ///< 像素编码类型。
 
     // 1) 内参矩阵 K = [ fx  0 cx ; 0 fy cy ; 0 0 1 ]（3×3，行优先）
@@ -219,6 +248,21 @@ class CameraBase
       return dc;
     }
   };
+
+  static inline CameraInfo MakeRuntimeInfo(const StaticInfo& info)
+  {
+    CameraInfo runtime{};
+    runtime.width = info.width;
+    runtime.height = info.height;
+    runtime.step = info.step;
+    runtime.encoding = info.encoding;
+    runtime.camera_matrix = info.camera_matrix;
+    runtime.distortion_model = info.distortion_model;
+    runtime.distortion_coefficients.raw = info.distortion_coefficients;
+    runtime.rectification_matrix = info.rectification_matrix;
+    runtime.projection_matrix = info.projection_matrix;
+    return runtime;
+  }
 
   CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera")
       : name_(name), cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this))
