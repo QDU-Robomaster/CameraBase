@@ -11,11 +11,8 @@ depends: []
 // clang-format on
 
 #include "app_framework.hpp"
-#include "libxr_rw.hpp"
-#include "libxr_time.hpp"
 #include "logger.hpp"
 #include "ramfs.hpp"
-#include "transform.hpp"
 
 // STL
 #include <array>
@@ -32,7 +29,7 @@ depends: []
  * - 像素编码与 ROS `sensor_msgs/Image.encoding` 的命名/含义保持一致或可直观映射。
  * - 所有矩阵按 **行优先（Row-major）** 存储。
  * - `step` 为固定输出模式下的每行字节数（stride, bytes per row），**不是每像素字节数**。
- * - 帧级时间戳等动态元数据不放在 `CameraInfo` 中，而由独立帧头承载。
+ * - 帧级时间戳等动态元数据由具体帧载荷承载，不放在 `CameraInfo` 中。
  */
 class CameraBase
 {
@@ -84,20 +81,6 @@ class CameraBase
     UNKNOWN               ///< 未知/自定义。
   };
 
-  struct ImageHeader
-  {
-    LibXR::MicrosecondTimestamp timestamp{};
-    uint64_t sequence{};
-  };
-
-  static constexpr uint32_t kSharedImageMaxWidth = 1920;
-  static constexpr uint32_t kSharedImageMaxHeight = 1080;
-  static constexpr uint32_t kSharedImageMaxChannels = 4;
-  static constexpr size_t kSharedImageMaxBytes =
-      static_cast<size_t>(kSharedImageMaxWidth) * kSharedImageMaxHeight *
-      kSharedImageMaxChannels;
-  static constexpr const char* kSharedImageTopicName = "image_frame";
-
   /**
    * @struct SharedImageFrame
    * @brief Linux shared image topic payload.
@@ -105,10 +88,19 @@ class CameraBase
    * 说明：
    * - 这是给 `LinuxSharedTopic` 用的固定容量帧结构；
    * - `width/height/step/encoding` 描述当前有效图像；
-   * - `data_size` 为本帧有效字节数，必须不超过 @ref kSharedImageMaxBytes。
+   * - `data_size` 为本帧有效字节数，必须不超过 @ref SharedImageFrame::max_bytes；
+   * - `data` 显式按缓存行对齐，避免共享内存图像负载起始地址靠默认布局碰运气。
    */
-  struct SharedImageFrame
+  struct alignas(64) SharedImageFrame
   {
+    static constexpr uint32_t max_width = 1920;
+    static constexpr uint32_t max_height = 1080;
+    static constexpr uint32_t max_channels = 4;
+    static constexpr size_t max_bytes =
+        static_cast<size_t>(max_width) * max_height * max_channels;
+    static constexpr size_t data_alignment = 64;
+    static constexpr const char* topic_name = "image_frame";
+
     uint64_t timestamp_us;
     uint64_t sequence;
     uint32_t width;
@@ -116,13 +108,27 @@ class CameraBase
     uint32_t step;
     uint32_t data_size;
     Encoding encoding;
-    std::array<uint8_t, kSharedImageMaxBytes> data;
+    alignas(data_alignment) std::array<uint8_t, max_bytes> data;
+
+    [[nodiscard]] static constexpr bool HasValidPayload(const SharedImageFrame& frame)
+    {
+      return frame.width > 0 && frame.height > 0 && frame.step > 0 &&
+             frame.data_size > 0 && frame.data_size <= max_bytes &&
+             static_cast<size_t>(frame.step) * static_cast<size_t>(frame.height) <=
+                 frame.data_size;
+    }
   };
 
   static_assert(std::is_trivial_v<SharedImageFrame>,
                 "SharedImageFrame must be trivial");
   static_assert(std::is_trivially_copyable_v<SharedImageFrame>,
                 "SharedImageFrame must be trivially copyable");
+  static_assert(std::is_standard_layout_v<SharedImageFrame>,
+                "SharedImageFrame must be standard layout");
+  static_assert(alignof(SharedImageFrame) >= SharedImageFrame::data_alignment,
+                "SharedImageFrame alignment is too small");
+  static_assert(offsetof(SharedImageFrame, data) % SharedImageFrame::data_alignment == 0,
+                "SharedImageFrame data must be aligned");
 
   /**
    * @struct CameraInfo
@@ -131,7 +137,7 @@ class CameraBase
    * 设计目标：
    * - 仅保留结构化字段，便于作为项目级 `inline constexpr` 常量；
    * - 可直接作为非类型模板参数（NTTP）；
-   * - 帧级动态元数据由共享图像帧或其他独立帧头承载，不再通过 `camera_info` topic 发布。
+   * - 帧级动态元数据由帧载荷自身承载，不再通过 `camera_info` topic 发布。
    */
   struct CameraInfo
   {
