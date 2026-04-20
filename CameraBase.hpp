@@ -19,7 +19,9 @@ depends: []
 
 // STL
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 /**
@@ -88,6 +90,40 @@ class CameraBase
     uint64_t sequence{};
   };
 
+  static constexpr uint32_t kSharedImageMaxWidth = 1920;
+  static constexpr uint32_t kSharedImageMaxHeight = 1080;
+  static constexpr uint32_t kSharedImageMaxChannels = 4;
+  static constexpr size_t kSharedImageMaxBytes =
+      static_cast<size_t>(kSharedImageMaxWidth) * kSharedImageMaxHeight *
+      kSharedImageMaxChannels;
+  static constexpr const char* kSharedImageTopicName = "image_frame";
+
+  /**
+   * @struct SharedImageFrame
+   * @brief Linux shared image topic payload.
+   *
+   * 说明：
+   * - 这是给 `LinuxSharedTopic` 用的固定容量帧结构；
+   * - `width/height/step/encoding` 描述当前有效图像；
+   * - `data_size` 为本帧有效字节数，必须不超过 @ref kSharedImageMaxBytes。
+   */
+  struct SharedImageFrame
+  {
+    uint64_t timestamp_us;
+    uint64_t sequence;
+    uint32_t width;
+    uint32_t height;
+    uint32_t step;
+    uint32_t data_size;
+    Encoding encoding;
+    std::array<uint8_t, kSharedImageMaxBytes> data;
+  };
+
+  static_assert(std::is_trivial_v<SharedImageFrame>,
+                "SharedImageFrame must be trivial");
+  static_assert(std::is_trivially_copyable_v<SharedImageFrame>,
+                "SharedImageFrame must be trivially copyable");
+
   /**
    * @struct CameraInfo
    * @brief 静态图像尺寸、编码与标定信息。
@@ -95,7 +131,7 @@ class CameraBase
    * 设计目标：
    * - 仅保留结构化字段，便于作为项目级 `inline constexpr` 常量；
    * - 可直接作为非类型模板参数（NTTP）；
-   * - 帧级动态元数据由 @ref ImageHeader 单独承载，不再通过 `camera_info` topic 发布。
+   * - 帧级动态元数据由共享图像帧或其他独立帧头承载，不再通过 `camera_info` topic 发布。
    */
   struct CameraInfo
   {
