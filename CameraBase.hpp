@@ -67,12 +67,17 @@ class CameraTypes
 
   struct CameraInfo
   {
+    // Image geometry and row stride in bytes.
     uint32_t width{};
     uint32_t height{};
     uint32_t step{};
     Encoding encoding{};
+
+    // Standard pinhole camera intrinsics.
     std::array<double, 9> camera_matrix;
     DistortionModel distortion_model{};
+
+    // Distortion/rectification/projection layout follows ROS CameraInfo.
     std::array<double, 14> distortion_coefficients;
     std::array<double, 9> rectification_matrix;
     std::array<double, 12> projection_matrix;
@@ -130,29 +135,42 @@ class CameraBase
   using DistortionModel = CameraTypes::DistortionModel;
   using CameraInfo = CameraTypes::CameraInfo;
 
-  static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
-  static constexpr std::size_t kFrameDataAlignment = 64;
-  static constexpr std::size_t kFrameBytes =
-      static_cast<std::size_t>(kCameraInfo.step) * static_cast<std::size_t>(kCameraInfo.height);
+  // Camera model is fixed by the template argument so downstream modules can
+  // use width/height/intrinsics as compile-time constants.
+  static inline constexpr CameraInfo camera_info = CameraInfoV;
 
-  struct alignas(kFrameDataAlignment) Frame
+  // Shared image buffers are aligned so later SIMD/shared-memory users do not
+  // need an extra copy.
+  static constexpr std::size_t frame_data_alignment = 64;
+  static constexpr std::size_t frame_bytes =
+      static_cast<std::size_t>(camera_info.step) * static_cast<std::size_t>(camera_info.height);
+
+  // One published frame: monotonic timing metadata plus tightly packed pixels.
+  struct alignas(frame_data_alignment) Frame
   {
+    // Capture time in microseconds and a monotonically increasing frame id.
     uint64_t timestamp_us;
     uint64_t sequence;
-    alignas(kFrameDataAlignment) std::array<uint8_t, kFrameBytes> data;
+
+    // Pixel bytes are stored as a single packed image buffer.
+    alignas(frame_data_alignment) std::array<uint8_t, frame_bytes> data;
   };
 
+  // Preserve an explicit name for the shared-topic payload type used by camera
+  // publishers/consumers.
   using SharedImageFrame = Frame;
 
-  static_assert(kCameraInfo.width > 0, "CameraBase requires non-zero width");
-  static_assert(kCameraInfo.height > 0, "CameraBase requires non-zero height");
-  static_assert(kCameraInfo.step > 0, "CameraBase requires non-zero step");
-  static_assert(kFrameBytes > 0, "CameraBase requires non-zero frame bytes");
+  // Enforce a POD-like payload layout so shared-memory/topic transport can treat
+  // Frame as a plain byte block.
+  static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
+  static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
+  static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
+  static_assert(frame_bytes > 0, "CameraBase requires non-zero frame bytes");
   static_assert(std::is_trivial_v<Frame>, "Frame must be trivial");
   static_assert(std::is_trivially_copyable_v<Frame>, "Frame must be trivially copyable");
   static_assert(std::is_standard_layout_v<Frame>, "Frame must be standard layout");
-  static_assert(alignof(Frame) >= kFrameDataAlignment, "Frame alignment is too small");
-  static_assert(offsetof(Frame, data) % kFrameDataAlignment == 0,
+  static_assert(alignof(Frame) >= frame_data_alignment, "Frame alignment is too small");
+  static_assert(offsetof(Frame, data) % frame_data_alignment == 0,
                 "Frame data must be aligned");
 
   CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera")
@@ -164,6 +182,7 @@ class CameraBase
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
 
+  // RamFS command entry used for quick manual tuning in bring-up.
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
@@ -194,6 +213,7 @@ class CameraBase
 
   static int CommandAdapter(void* instance, int argc, char** argv)
   {
+    // Bridge the generic RamFS callback signature back to the typed handler.
     return CommandFun(static_cast<CameraBase*>(instance), argc, argv);
   }
 
