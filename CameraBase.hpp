@@ -23,6 +23,17 @@ depends: []
 #include <vector>
 
 /**
+ * @struct PoseStamped
+ * @brief 带时间戳的位姿消息。
+ */
+struct PoseStamped
+{
+  LibXR::MicrosecondTimestamp timestamp{};
+  LibXR::Quaternion<float> rotation{};
+  LibXR::Position<float> translation{};
+};
+
+/**
  * @class CameraBase
  * @brief 相机通用类型容器（仅定义公共类型/结构，不包含具体接口）。
  *
@@ -80,17 +91,6 @@ class CameraBase
     DOUBLE_SPHERE,        ///< 双球：xi,alpha。
     THIN_PRISM,           ///< 薄棱镜项 s1..s4；常与 radtan 组合。
     UNKNOWN               ///< 未知/自定义。
-  };
-
-  /**
-   * @struct PoseStamped
-   * @brief 带时间戳的相机位姿。
-   */
-  struct PoseStamped
-  {
-    LibXR::MicrosecondTimestamp timestamp{};
-    LibXR::Quaternion<float> rotation{};
-    LibXR::Position<float> translation{};
   };
 
   struct ImageHeader
