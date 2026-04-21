@@ -204,23 +204,18 @@ class CameraBase
     virtual void AbortFrame(FrameLease& lease) = 0;
   };
 
-  // shared-memory 传输会直接把这些载荷当裸字节块处理，所以这里强约束
-  // trivial / standard-layout。
+  // shared-memory 传输会直接把这些载荷当裸字节块处理，所以这里只保留
+  // 真正影响 ABI 和内存布局的约束。
   static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
   static_assert(frame_bytes > 0, "CameraBase requires non-zero frame bytes");
-  static_assert(std::is_trivial_v<Frame>, "Frame must be trivial");
   static_assert(std::is_trivially_copyable_v<Frame>, "Frame must be trivially copyable");
   static_assert(std::is_standard_layout_v<Frame>, "Frame must be standard layout");
-  static_assert(std::is_trivial_v<Pose>, "Pose must be trivial");
   static_assert(std::is_trivially_copyable_v<Pose>, "Pose must be trivially copyable");
-  static_assert(std::is_trivial_v<Motion>, "Motion must be trivial");
   static_assert(std::is_trivially_copyable_v<Motion>, "Motion must be trivially copyable");
-  static_assert(std::is_trivial_v<FrameContext>, "FrameContext must be trivial");
   static_assert(std::is_trivially_copyable_v<FrameContext>,
                 "FrameContext must be trivially copyable");
-  static_assert(std::is_trivial_v<FrameLease>, "FrameLease must be trivial");
   static_assert(std::is_trivially_copyable_v<FrameLease>,
                 "FrameLease must be trivially copyable");
   static_assert(alignof(Frame) >= frame_data_alignment, "Frame alignment is too small");
