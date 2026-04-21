@@ -11,6 +11,7 @@ depends: []
 // clang-format on
 
 #include "app_framework.hpp"
+#include "message.hpp"
 #include "logger.hpp"
 #include "ramfs.hpp"
 
@@ -137,41 +138,57 @@ class CameraBase
   using Encoding = CameraTypes::Encoding;
   using DistortionModel = CameraTypes::DistortionModel;
   using CameraInfo = CameraTypes::CameraInfo;
-  static constexpr std::size_t frame_alignment = 64;
+  static constexpr std::size_t image_alignment = 64;
 
   // 这一份静态相机描述会被整条视觉链共享，后续模块可直接把分辨率、
   // 内参、畸变模型当作编译期常量使用。
   static inline constexpr CameraInfo camera_info = CameraInfoV;
-  static constexpr std::size_t frame_bytes =
+  static constexpr std::size_t image_bytes =
       static_cast<std::size_t>(camera_info.step) * static_cast<std::size_t>(camera_info.height);
 
-  struct alignas(frame_alignment) Frame
+  struct alignas(image_alignment) ImageFrame
   {
     uint64_t timestamp_us;
-    uint64_t sequence;
+    alignas(image_alignment) std::array<uint8_t, image_bytes> data;
+  };
+
+  struct ImuStamped
+  {
+    uint64_t timestamp_us;
     std::array<float, 4> rotation_wxyz;
     std::array<float, 3> translation_xyz;
     std::array<float, 3> angular_velocity_xyz;
     std::array<float, 3> linear_acceleration_xyz;
-    alignas(frame_alignment) std::array<uint8_t, frame_bytes> data;
   };
 
-  using SyncCommitCallback = Frame* (*)(void* sync_context);
+  using ImageCommitCallback = ImageFrame* (*)(void* image_sink_context);
 
-  // shared-memory 传输会直接把这些载荷当裸字节块处理，所以这里只保留
-  // 真正影响静态几何合法性的约束。
+  // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
   static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
-  static_assert(frame_bytes > 0, "CameraBase requires non-zero frame bytes");
-  static_assert(std::is_trivially_copyable_v<Frame>, "CameraBase::Frame must be trivially copyable");
-  static_assert(std::is_standard_layout_v<Frame>, "CameraBase::Frame must be standard layout");
-  static_assert(alignof(Frame) >= frame_alignment, "CameraBase::Frame alignment is too small");
-  static_assert(offsetof(Frame, data) % frame_alignment == 0,
-                "CameraBase::Frame image payload must stay aligned");
+  static_assert(image_bytes > 0, "CameraBase requires non-zero image bytes");
+  static_assert(std::is_trivially_copyable_v<ImageFrame>,
+                "CameraBase::ImageFrame must be trivially copyable");
+  static_assert(std::is_standard_layout_v<ImageFrame>,
+                "CameraBase::ImageFrame must be standard layout");
+  static_assert(std::is_trivially_copyable_v<ImuStamped>,
+                "CameraBase::ImuStamped must be trivially copyable");
+  static_assert(std::is_standard_layout_v<ImuStamped>,
+                "CameraBase::ImuStamped must be standard layout");
+  static_assert(alignof(ImageFrame) >= image_alignment,
+                "CameraBase::ImageFrame alignment is too small");
+  static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
+                "CameraBase::ImageFrame image payload must stay aligned");
 
-  CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera")
-      : name_(name), cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this))
+  CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera",
+             const char* image_topic_name = "camera_image",
+             const char* imu_topic_name = "camera_imu")
+      : name_(name),
+        image_topic_name_(image_topic_name),
+        imu_topic_name_(imu_topic_name),
+        cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this)),
+        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
@@ -181,49 +198,56 @@ class CameraBase
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
 
-  bool RegisterSync(void* sync_context, Frame* initial_frame,
-                    SyncCommitCallback commit_callback)
+  const char* ImageTopicName() const { return image_topic_name_; }
+
+  const char* ImuTopicName() const { return imu_topic_name_; }
+
+  void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
+
+  bool RegisterImageSink(void* image_sink_context, ImageFrame* initial_image,
+                         ImageCommitCallback commit_callback)
   {
-    if (sync_context == nullptr || initial_frame == nullptr || commit_callback == nullptr)
+    if (image_sink_context == nullptr || initial_image == nullptr || commit_callback == nullptr)
     {
-      XR_LOG_ERROR("CameraBase(%s): sync registration got null argument", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink registration got null argument", name_);
       return false;
     }
-    if (sync_registered_.load(std::memory_order_acquire))
+    if (image_sink_registered_.load(std::memory_order_acquire))
     {
-      XR_LOG_ERROR("CameraBase(%s): sync already registered", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_);
       return false;
     }
 
-    sync_context_ = sync_context;
-    writable_frame_ = initial_frame;
-    commit_callback_ = commit_callback;
-    sync_registered_.store(true, std::memory_order_release);
+    image_sink_context_ = image_sink_context;
+    writable_image_ = initial_image;
+    image_commit_callback_ = commit_callback;
+    image_sink_registered_.store(true, std::memory_order_release);
     return true;
   }
 
-  bool SyncReady() const
+  bool ImageSinkReady() const
   {
-    return sync_registered_.load(std::memory_order_acquire) && writable_frame_ != nullptr;
+    return image_sink_registered_.load(std::memory_order_acquire) &&
+           writable_image_ != nullptr;
   }
 
-  Frame* GetWritableFrame() { return SyncReady() ? writable_frame_ : nullptr; }
+  ImageFrame* GetWritableImage() { return ImageSinkReady() ? writable_image_ : nullptr; }
 
-  bool CommitFrame()
+  bool CommitImage()
   {
-    if (!SyncReady() || commit_callback_ == nullptr)
+    if (!ImageSinkReady() || image_commit_callback_ == nullptr)
     {
       return false;
     }
 
-    Frame* next_frame = commit_callback_(sync_context_);
-    if (next_frame == nullptr)
+    ImageFrame* next_image = image_commit_callback_(image_sink_context_);
+    if (next_image == nullptr)
     {
-      XR_LOG_ERROR("CameraBase(%s): sync callback returned null writable frame", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image", name_);
       return false;
     }
 
-    writable_frame_ = next_frame;
+    writable_image_ = next_image;
     return true;
   }
 
@@ -258,9 +282,12 @@ class CameraBase
 
  protected:
   const char* name_;
+  const char* image_topic_name_;
+  const char* imu_topic_name_;
   LibXR::RamFS::File cmd_file_;
-  void* sync_context_{nullptr};
-  Frame* writable_frame_{nullptr};
-  SyncCommitCallback commit_callback_{nullptr};
-  std::atomic<bool> sync_registered_{false};
+  LibXR::Topic imu_topic_;
+  void* image_sink_context_{nullptr};
+  ImageFrame* writable_image_{nullptr};
+  ImageCommitCallback image_commit_callback_{nullptr};
+  std::atomic<bool> image_sink_registered_{false};
 };
