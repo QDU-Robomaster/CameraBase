@@ -14,9 +14,12 @@ depends: []
 #include "logger.hpp"
 #include "ramfs.hpp"
 
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <type_traits>
 #include <vector>
 
@@ -135,33 +138,74 @@ class CameraBase
   using DistortionModel = CameraTypes::DistortionModel;
   using CameraInfo = CameraTypes::CameraInfo;
 
-  // Camera model is fixed by the template argument so downstream modules can
-  // use width/height/intrinsics as compile-time constants.
+  // 这一份静态相机描述会被整条视觉链共享，后续模块可直接把分辨率、
+  // 内参、畸变模型当作编译期常量使用。
   static inline constexpr CameraInfo camera_info = CameraInfoV;
 
-  // Shared image buffers are aligned so later SIMD/shared-memory users do not
-  // need an extra copy.
+  // 共享图像帧按固定对齐存放，后续 shared topic / SIMD 用户可以直接消费。
   static constexpr std::size_t frame_data_alignment = 64;
   static constexpr std::size_t frame_bytes =
       static_cast<std::size_t>(camera_info.step) * static_cast<std::size_t>(camera_info.height);
 
-  // One published frame: monotonic timing metadata plus tightly packed pixels.
+  // 一帧完整图像：时间戳、序号，以及一块连续像素缓冲区。
   struct alignas(frame_data_alignment) Frame
   {
-    // Capture time in microseconds and a monotonically increasing frame id.
+    // 采集时间戳（us）与单调递增帧号。
     uint64_t timestamp_us;
     uint64_t sequence;
 
-    // Pixel bytes are stored as a single packed image buffer.
+    // 像素数据按 step * height 连续存放。
     alignas(frame_data_alignment) std::array<uint8_t, frame_bytes> data;
   };
 
-  // Preserve an explicit name for the shared-topic payload type used by camera
-  // publishers/consumers.
+  // 保留一层显式别名，方便生产者/消费者直接表达“共享图像帧”。
   using SharedImageFrame = Frame;
 
-  // Enforce a POD-like payload layout so shared-memory/topic transport can treat
-  // Frame as a plain byte block.
+  // 这些元数据类型需要保持 trivial，不能依赖默认成员初始化。
+  struct Pose
+  {
+    std::array<float, 4> rotation_wxyz;
+    std::array<float, 3> translation_xyz;
+  };
+
+  struct Motion
+  {
+    std::array<float, 3> angular_velocity_xyz;
+    std::array<float, 3> linear_acceleration_xyz;
+  };
+
+  struct FrameContext
+  {
+    uint64_t timestamp_us;
+    uint64_t sequence;
+    Pose pose;
+    Motion motion;
+  };
+
+  struct FrameLease
+  {
+    uint8_t* image_data;
+    std::size_t image_step;
+    void* private_data;
+  };
+
+  class Sink
+  {
+   public:
+    virtual ~Sink() = default;
+
+    // 为当前帧借出一块可写目标缓冲区。
+    virtual bool AcquireFrame(const FrameContext& context, FrameLease& lease) = 0;
+
+    // 相机写完 lease.image_data 后，调用该函数发布整帧。
+    virtual void CommitFrame(FrameLease& lease) = 0;
+
+    // 放弃当前借出的缓冲区，不发布。
+    virtual void AbortFrame(FrameLease& lease) = 0;
+  };
+
+  // shared-memory 传输会直接把这些载荷当裸字节块处理，所以这里强约束
+  // trivial / standard-layout。
   static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
@@ -169,6 +213,16 @@ class CameraBase
   static_assert(std::is_trivial_v<Frame>, "Frame must be trivial");
   static_assert(std::is_trivially_copyable_v<Frame>, "Frame must be trivially copyable");
   static_assert(std::is_standard_layout_v<Frame>, "Frame must be standard layout");
+  static_assert(std::is_trivial_v<Pose>, "Pose must be trivial");
+  static_assert(std::is_trivially_copyable_v<Pose>, "Pose must be trivially copyable");
+  static_assert(std::is_trivial_v<Motion>, "Motion must be trivial");
+  static_assert(std::is_trivially_copyable_v<Motion>, "Motion must be trivially copyable");
+  static_assert(std::is_trivial_v<FrameContext>, "FrameContext must be trivial");
+  static_assert(std::is_trivially_copyable_v<FrameContext>,
+                "FrameContext must be trivially copyable");
+  static_assert(std::is_trivial_v<FrameLease>, "FrameLease must be trivial");
+  static_assert(std::is_trivially_copyable_v<FrameLease>,
+                "FrameLease must be trivially copyable");
   static_assert(alignof(Frame) >= frame_data_alignment, "Frame alignment is too small");
   static_assert(offsetof(Frame, data) % frame_data_alignment == 0,
                 "Frame data must be aligned");
@@ -179,10 +233,36 @@ class CameraBase
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
+  virtual ~CameraBase() = default;
+
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
 
-  // RamFS command entry used for quick manual tuning in bring-up.
+  bool RegisterSink(Sink& sink)
+  {
+    Sink* expected = nullptr;
+    if (!sink_.compare_exchange_strong(expected, &sink, std::memory_order_acq_rel,
+                                       std::memory_order_acquire))
+    {
+      XR_LOG_ERROR("CameraBase: sink already registered on %s", name_);
+      return false;
+    }
+    return true;
+  }
+
+  void UnregisterSink(Sink& sink)
+  {
+    Sink* expected = &sink;
+    if (!sink_.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel,
+                                       std::memory_order_acquire) &&
+        expected != nullptr)
+    {
+      XR_LOG_WARN("CameraBase: unregister ignored because another sink is active on %s",
+                  name_);
+    }
+  }
+
+  // bring-up 阶段的临时命令入口。
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
@@ -211,13 +291,10 @@ class CameraBase
     return -1;
   }
 
-  static int CommandAdapter(void* instance, int argc, char** argv)
-  {
-    // Bridge the generic RamFS callback signature back to the typed handler.
-    return CommandFun(static_cast<CameraBase*>(instance), argc, argv);
-  }
-
  protected:
+  Sink* GetSink() const { return sink_.load(std::memory_order_acquire); }
+
   const char* name_;
   LibXR::RamFS::File cmd_file_;
+  std::atomic<Sink*> sink_{nullptr};
 };
