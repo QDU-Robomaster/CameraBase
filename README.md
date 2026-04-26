@@ -14,12 +14,12 @@ that concrete camera modules use.
 - producer-side payload definitions:
   - `CameraBase<Info>::ImageFrame`
   - `CameraBase<Info>::ImuStamped`
-- producer-side image sink registration and commit boundary
+- producer-side image lease registration and commit boundary
 - IMU topic publish helper for concrete camera implementations
 
 ## Current Boundary
 
-- `CameraBase<Info>` owns raw producer-side types and sink registration
+- `CameraBase<Info>` owns raw producer-side types and the typed image lease boundary
 - `WebotsCamera<Info>` or other concrete camera modules:
   - fill `ImuStamped`
   - write image bytes into the registered `ImageFrame`
@@ -40,7 +40,7 @@ that concrete camera modules use.
 - `CameraBase<Info>::ImuStamped`
   - timestamped rotation, translation, angular velocity, linear acceleration
 - image sink API:
-  - `RegisterImageSink(...)`
+  - `RegisterImageSink(ImageSink&)`
   - `ImageSinkReady()`
   - `GetWritableImage()`
   - `CommitImage()`
@@ -51,5 +51,9 @@ that concrete camera modules use.
   CameraInfo.height`
 - this module keeps the front-half ABI trivial / standard-layout so the shared
   memory boundary stays predictable
+- image lease registration is now typed and narrow:
+  - one sink object hands out the first writable frame
+  - each `CommitImage()` returns the next writable frame
+  - no `void* + function pointer` callback surface remains
 - `CameraTypes::BuildPnPDistCoeffs(...)` provides the compile-time PnP-facing
   distortion description helper

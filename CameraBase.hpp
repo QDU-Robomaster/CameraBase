@@ -201,8 +201,24 @@ class CameraBase
     std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
   };
 
-  /// 图像生产者提交一帧后，用于切换到下一个可写槽位的回调。
-  using ImageCommitCallback = ImageFrame* (*)(void* image_sink_context);
+  /**
+   * @class ImageSink
+   * @brief 图像写槽位的最小 lease/commit 边界。
+   *
+   * @note 这里明确只表达“给生产者一个可写帧，提交后再换下一个可写帧”。
+   *       不再暴露 `void* + function pointer` 这种伪通用注册接口。
+   */
+  class ImageSink
+  {
+   public:
+    virtual ~ImageSink() = default;
+
+    /// 首次注册时返回第一块可写图像槽位。
+    virtual ImageFrame* AcquireInitialWritableImage() = 0;
+
+    /// 提交当前已写满的图像帧，并返回下一块可写槽位。
+    virtual ImageFrame* CommitImageAndGetNextWritable(ImageFrame& committed_image) = 0;
+  };
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
   static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
@@ -245,23 +261,24 @@ class CameraBase
 
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
-  bool RegisterImageSink(void* image_sink_context, ImageFrame* initial_image,
-                         ImageCommitCallback commit_callback)
+  bool RegisterImageSink(ImageSink& image_sink)
   {
-    if (image_sink_context == nullptr || initial_image == nullptr || commit_callback == nullptr)
-    {
-      XR_LOG_ERROR("CameraBase(%s): image sink registration got null argument", name_);
-      return false;
-    }
     if (image_sink_registered_.load(std::memory_order_acquire))
     {
       XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_);
       return false;
     }
 
-    image_sink_context_ = image_sink_context;
+    ImageFrame* initial_image = image_sink.AcquireInitialWritableImage();
+    if (initial_image == nullptr)
+    {
+      XR_LOG_ERROR("CameraBase(%s): image sink failed to provide initial writable image",
+                   name_);
+      return false;
+    }
+
+    image_sink_ = &image_sink;
     writable_image_ = initial_image;
-    image_commit_callback_ = commit_callback;
     image_sink_registered_.store(true, std::memory_order_release);
     return true;
   }
@@ -276,15 +293,17 @@ class CameraBase
 
   bool CommitImage()
   {
-    if (!ImageSinkReady() || image_commit_callback_ == nullptr)
+    if (!ImageSinkReady() || image_sink_ == nullptr)
     {
       return false;
     }
 
-    ImageFrame* next_image = image_commit_callback_(image_sink_context_);
+    ImageFrame* current_image = writable_image_;
+    ImageFrame* next_image = image_sink_->CommitImageAndGetNextWritable(*current_image);
     if (next_image == nullptr)
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink returned null writable image after commit",
+                   name_);
       return false;
     }
 
@@ -327,8 +346,7 @@ class CameraBase
   const char* imu_topic_name_;
   LibXR::RamFS::File cmd_file_;
   LibXR::Topic imu_topic_;
-  void* image_sink_context_{nullptr};
+  ImageSink* image_sink_{nullptr};
   ImageFrame* writable_image_{nullptr};
-  ImageCommitCallback image_commit_callback_{nullptr};
   std::atomic<bool> image_sink_registered_{false};
 };
