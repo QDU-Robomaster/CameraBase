@@ -40,7 +40,7 @@ that concrete camera modules use.
 - `CameraBase<Info>::ImuStamped`
   - timestamped rotation, translation, angular velocity, linear acceleration
 - image sink API:
-  - `RegisterImageSink(ImageSink&)`
+  - `RegisterImageSink(ImageLeaseSink&)`
   - `ImageSinkReady()`
   - `GetWritableImage()`
   - `CommitImage()`
@@ -52,8 +52,8 @@ that concrete camera modules use.
 - this module keeps the front-half ABI trivial / standard-layout so the shared
   memory boundary stays predictable
 - image lease registration is now typed and narrow:
-  - one sink object hands out the first writable frame
-  - each `CommitImage()` returns the next writable frame
+  - one sink object hands out the current writable image slot
+  - each `CommitImage()` returns the next writable image slot
   - no `void* + function pointer` callback surface remains
 - `CameraTypes::BuildPnPDistCoeffs(...)` provides the compile-time PnP-facing
   distortion description helper

@@ -202,22 +202,23 @@ class CameraBase
   };
 
   /**
-   * @class ImageSink
-   * @brief 图像写槽位的最小 lease/commit 边界。
+   * @class ImageLeaseSink
+   * @brief 图像写槽位的最小 writable-image lease/commit 边界。
    *
-   * @note 这里明确只表达“给生产者一个可写帧，提交后再换下一个可写帧”。
+   * @note 这里明确只表达“给生产者一块可写图像槽位，提交后再切到下一块”。
    *       不再暴露 `void* + function pointer` 这种伪通用注册接口。
    */
-  class ImageSink
+  class ImageLeaseSink
   {
    public:
-    virtual ~ImageSink() = default;
+    virtual ~ImageLeaseSink() = default;
 
-    /// 首次注册时返回第一块可写图像槽位。
-    virtual ImageFrame* AcquireInitialWritableImage() = 0;
+    /// 注册时返回当前可写图像槽位。
+    virtual ImageFrame* AcquireWritableImage() = 0;
 
-    /// 提交当前已写满的图像帧，并返回下一块可写槽位。
-    virtual ImageFrame* CommitImageAndGetNextWritable(ImageFrame& committed_image) = 0;
+    /// 提交当前已写满的图像帧，并返回下一块可写图像槽位。
+    virtual ImageFrame* CommitAndAcquireNextWritableImage(
+        ImageFrame& committed_image) = 0;
   };
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
@@ -261,7 +262,7 @@ class CameraBase
 
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
-  bool RegisterImageSink(ImageSink& image_sink)
+  bool RegisterImageSink(ImageLeaseSink& image_sink)
   {
     if (image_sink_registered_.load(std::memory_order_acquire))
     {
@@ -269,16 +270,16 @@ class CameraBase
       return false;
     }
 
-    ImageFrame* initial_image = image_sink.AcquireInitialWritableImage();
-    if (initial_image == nullptr)
+    ImageFrame* writable_image = image_sink.AcquireWritableImage();
+    if (writable_image == nullptr)
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink failed to provide initial writable image",
+      XR_LOG_ERROR("CameraBase(%s): image sink failed to provide writable image",
                    name_);
       return false;
     }
 
     image_sink_ = &image_sink;
-    writable_image_ = initial_image;
+    current_writable_image_ = writable_image;
     image_sink_registered_.store(true, std::memory_order_release);
     return true;
   }
@@ -286,10 +287,13 @@ class CameraBase
   bool ImageSinkReady() const
   {
     return image_sink_registered_.load(std::memory_order_acquire) &&
-           writable_image_ != nullptr;
+           current_writable_image_ != nullptr;
   }
 
-  ImageFrame* GetWritableImage() { return ImageSinkReady() ? writable_image_ : nullptr; }
+  ImageFrame* GetWritableImage()
+  {
+    return ImageSinkReady() ? current_writable_image_ : nullptr;
+  }
 
   bool CommitImage()
   {
@@ -298,16 +302,17 @@ class CameraBase
       return false;
     }
 
-    ImageFrame* current_image = writable_image_;
-    ImageFrame* next_image = image_sink_->CommitImageAndGetNextWritable(*current_image);
-    if (next_image == nullptr)
+    ImageFrame* committed_image = current_writable_image_;
+    ImageFrame* next_writable_image =
+        image_sink_->CommitAndAcquireNextWritableImage(*committed_image);
+    if (next_writable_image == nullptr)
     {
       XR_LOG_ERROR("CameraBase(%s): image sink returned null writable image after commit",
                    name_);
       return false;
     }
 
-    writable_image_ = next_image;
+    current_writable_image_ = next_writable_image;
     return true;
   }
 
@@ -346,7 +351,7 @@ class CameraBase
   const char* imu_topic_name_;
   LibXR::RamFS::File cmd_file_;
   LibXR::Topic imu_topic_;
-  ImageSink* image_sink_{nullptr};
-  ImageFrame* writable_image_{nullptr};
+  ImageLeaseSink* image_sink_{nullptr};
+  ImageFrame* current_writable_image_{nullptr};
   std::atomic<bool> image_sink_registered_{false};
 };
