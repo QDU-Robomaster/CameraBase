@@ -11,217 +11,312 @@ depends: []
 // clang-format on
 
 #include "app_framework.hpp"
-#include "libxr_rw.hpp"
-#include "libxr_time.hpp"
+#include "message.hpp"
 #include "logger.hpp"
 #include "ramfs.hpp"
 
-// STL
+#include <atomic>
 #include <array>
+#include <cstddef>
 #include <cstdint>
-#include <initializer_list>
-#include <vector>
+#include <cstdlib>
+#include <cstring>
+#include <type_traits>
 
 /**
- * @class CameraBase
- * @brief 相机通用类型容器（仅定义公共类型/结构，不包含具体接口）。
- *
- * 说明：
- * - 像素编码与 ROS `sensor_msgs/Image.encoding` 的命名/含义保持一致或可直观映射。
- * - 所有矩阵按 **行优先（Row-major）** 存储。
- * - `step` 为每行字节数（stride, bytes per row），**不是每像素字节数**。
+ * @class CameraTypes
+ * @brief 相机静态类型定义容器。
  */
-class CameraBase
+class CameraTypes
 {
  public:
   /**
    * @enum Encoding
-   * @brief 图像像素编码类型。
+   * @brief 图像像素编码格式。
    */
   enum Encoding : uint8_t
   {
-    INVALID = 0,   ///< 无效/未设置的编码占位。
-    RGB8,          ///< 8 位/通道，RGB 通道顺序，24bpp。
-    BGR8,          ///< 8 位/通道，BGR 通道顺序，24bpp。
-    RGBA8,         ///< 8 位/通道，RGBA（含 alpha），32bpp。
-    BGRA8,         ///< 8 位/通道，BGRA（含 alpha），32bpp。
-    RGB16,         ///< 16 位/通道，RGB，48bpp。
-    BGR16,         ///< 16 位/通道，BGR，48bpp。
-    RGBA16,        ///< 16 位/通道，RGBA，64bpp。
-    BGRA16,        ///< 16 位/通道，BGRA，64bpp。
-    MONO8,         ///< 8 位单通道灰度（Y）。
-    MONO16,        ///< 16 位单通道灰度（Y）。
-    BAYER_RGGB8,   ///< 8 位 Bayer RAW，排列 RGGB。
-    BAYER_GRBG8,   ///< 8 位 Bayer RAW，排列 GRBG。
-    BAYER_GBRG8,   ///< 8 位 Bayer RAW，排列 GBRG。
-    BAYER_BGGR8,   ///< 8 位 Bayer RAW，排列 BGGR。
-    BAYER_RGGB16,  ///< 16 位 Bayer RAW，排列 RGGB。
-    BAYER_GRBG16,  ///< 16 位 Bayer RAW，排列 GRBG。
-    BAYER_GBRG16,  ///< 16 位 Bayer RAW，排列 GBRG。
-    BAYER_BGGR16,  ///< 16 位 Bayer RAW，排列 BGGR。
-    YUV422         ///< 打包 YUV 4:2:2（常见布局
-                   ///< YUYV/UYVY）。如需精确到子格式，请在协议层另行注明。
+    INVALID = 0,   ///< 无效或未初始化的编码占位。
+    RGB8,          ///< 8 位 RGB 三通道。
+    BGR8,          ///< 8 位 BGR 三通道。
+    RGBA8,         ///< 8 位 RGBA 四通道。
+    BGRA8,         ///< 8 位 BGRA 四通道。
+    RGB16,         ///< 16 位 RGB 三通道。
+    BGR16,         ///< 16 位 BGR 三通道。
+    RGBA16,        ///< 16 位 RGBA 四通道。
+    BGRA16,        ///< 16 位 BGRA 四通道。
+    MONO8,         ///< 8 位单通道灰度图。
+    MONO16,        ///< 16 位单通道灰度图。
+    BAYER_RGGB8,   ///< 8 位 Bayer，RGGB 排列。
+    BAYER_GRBG8,   ///< 8 位 Bayer，GRBG 排列。
+    BAYER_GBRG8,   ///< 8 位 Bayer，GBRG 排列。
+    BAYER_BGGR8,   ///< 8 位 Bayer，BGGR 排列。
+    BAYER_RGGB16,  ///< 16 位 Bayer，RGGB 排列。
+    BAYER_GRBG16,  ///< 16 位 Bayer，GRBG 排列。
+    BAYER_GBRG16,  ///< 16 位 Bayer，GBRG 排列。
+    BAYER_BGGR16,  ///< 16 位 Bayer，BGGR 排列。
+    YUV422         ///< 打包 YUV 4:2:2。
   };
 
   /**
    * @enum DistortionModel
-   * @brief 畸变模型枚举。
+   * @brief 相机畸变模型。
    */
   enum class DistortionModel : uint8_t
   {
-    NONE = 0,             ///< 无畸变；所有系数视为 0。
-    PLUMB_BOB,            ///< Brown–Conrady（radtan）；k1,k2,p1,p2,k3。
-    RATIONAL_POLYNOMIAL,  ///< OpenCV 扩展 8/12/14 参：+k4..k6,+s1..s4,+tauX,tauY。
-    EQUIDISTANT,          ///< 等距（KB4 fisheye）：k1..k4。
-    FOV,                  ///< Devernay–Basu FOV：常用单参 w。
-    OMNI,                 ///< 统一全向（Mei/Scaramuzza）：含 xi。
-    EXTENDED_UNIFIED,     ///< 扩展统一（EUCM）：alpha,beta。
-    DOUBLE_SPHERE,        ///< 双球：xi,alpha。
-    THIN_PRISM,           ///< 薄棱镜项 s1..s4；常与 radtan 组合。
-    UNKNOWN               ///< 未知/自定义。
+    NONE = 0,             ///< 无畸变模型。
+    PLUMB_BOB,            ///< Brown-Conrady / plumb_bob。
+    RATIONAL_POLYNOMIAL,  ///< OpenCV 扩展有理多项式模型。
+    EQUIDISTANT,          ///< 等距鱼眼模型。
+    FOV,                  ///< FOV 畸变模型。
+    OMNI,                 ///< 统一全向模型。
+    EXTENDED_UNIFIED,     ///< 扩展统一相机模型。
+    DOUBLE_SPHERE,        ///< 双球模型。
+    THIN_PRISM,           ///< 薄棱镜模型。
+    UNKNOWN               ///< 未知或自定义模型。
   };
-
-  /**
-   * @union DistortionCoeffs
-   * @brief 畸变系数共用体：共享同一段 `double[14]` 存储。
-   */
-  union DistortionCoeffs
-  {
-    std::array<double, 14> raw;  ///< 原始系数存储（索引 0..13）。
-
-    struct
-    {
-      double k1, k2, p1, p2, k3;
-    } plumb_bob;  ///< 5
-    struct
-    {
-      double k1, k2, k3, k4;
-    } equidistant;  ///< 4
-    struct
-    {
-      double w;
-    } fov;  ///< 1
-    struct
-    {
-      double xi, k1, k2, p1, p2, k3;
-    } omni;  ///< 6
-    struct
-    {
-      double alpha, beta;
-    } extended_unified;  ///< 2
-    struct
-    {
-      double xi, alpha;
-    } double_sphere;  ///< 2
-    struct
-    {
-      double s1, s2, s3, s4;
-    } thin_prism;  ///< 4
-    struct
-    {  // 14（OpenCV 完整有理多项式）
-      double k1, k2, p1, p2, k3, k4, k5, k6, s1, s2, s3, s4, tauX, tauY;
-    } rational14;  ///< 14
-
-    DistortionCoeffs() : raw{} {}  ///< 零初始化并激活 raw 成员。
-
-    DistortionCoeffs(std::initializer_list<double> init)
-    {
-      ASSERT(init.size() <= 14);
-      for (size_t i = 0; i < init.size(); i++)
-      {
-        raw[i] = init.begin()[i];
-      }
-    }
-  };
-  static_assert(sizeof(DistortionCoeffs) == sizeof(std::array<double, 14>),
-                "overlay size mismatch");
-  static_assert(alignof(DistortionCoeffs) == alignof(std::array<double, 14>),
-                "overlay align mismatch");
 
   /**
    * @struct CameraInfo
-   * @brief 图像尺寸、时间戳、编码与标定信息。
-   *
-   * 字段顺序与常见相机模型表达一致：
-   * 1) 内参矩阵 K；2) 畸变模型与参数；3) 矫正旋转 R；4) 投影矩阵 P。
+   * @brief 编译期静态相机描述。
    */
   struct CameraInfo
   {
-    // 基本图像信息
-    uint32_t width{};                         ///< 图像宽度（像素）。
-    uint32_t height{};                        ///< 图像高度（像素）。
-    uint32_t step{};                          ///< 每行字节数（bytes per row / stride）。
-    LibXR::MicrosecondTimestamp timestamp{};  ///< 采集时间戳（微秒）。
-    Encoding encoding{};                      ///< 像素编码类型。
-
-    // 1) 内参矩阵 K = [ fx  0 cx ; 0 fy cy ; 0 0 1 ]（3×3，行优先）
-    std::array<double, 9> camera_matrix;
-
-    // 2) 畸变模型与参数（依据所选模型使用前 N 项，其余置 0）
-    DistortionModel distortion_model{};        ///< 见 @ref DistortionModel 。
-    DistortionCoeffs distortion_coefficients;  ///< 最多 14 项。
-
-    // 3) 矫正后的旋转矩阵 R（3×3，行优先）
-    std::array<double, 9> rectification_matrix;
-
-    // 4) 投影矩阵 P（3×4，行优先）
-    // P = [ fx'  0   cx'  Tx ;
-    //        0  fy' cy'  Ty ;
-    //        0   0   1    0 ]
-    std::array<double, 12> projection_matrix;
-
-    static inline std::vector<double> ToPnPDistCoeffs(
-        CameraBase::DistortionModel model, const CameraBase::DistortionCoeffs& D)
-    {
-      std::vector<double> dc;
-      switch (model)
-      {
-        case CameraBase::DistortionModel::NONE:
-          // 无畸变：传空向量
-          break;
-
-        case CameraBase::DistortionModel::PLUMB_BOB:
-          // Brown–Conrady：k1,k2,p1,p2,k3
-          dc = {D.plumb_bob.k1, D.plumb_bob.k2, D.plumb_bob.p1, D.plumb_bob.p2,
-                D.plumb_bob.k3};
-          break;
-
-        case CameraBase::DistortionModel::RATIONAL_POLYNOMIAL:
-          // 多数 PnP 实现接受前 8 项：k1,k2,p1,p2,k3,k4,k5,k6
-          dc = {D.rational14.k1, D.rational14.k2, D.rational14.p1, D.rational14.p2,
-                D.rational14.k3, D.rational14.k4, D.rational14.k5, D.rational14.k6};
-          XR_LOG_WARN(
-              "PnPSolver: using 8-term rational; extend to 14 if backend supports.");
-          break;
-
-        case CameraBase::DistortionModel::EQUIDISTANT:
-        case CameraBase::DistortionModel::FOV:
-        case CameraBase::DistortionModel::OMNI:
-        case CameraBase::DistortionModel::EXTENDED_UNIFIED:
-        case CameraBase::DistortionModel::DOUBLE_SPHERE:
-        case CameraBase::DistortionModel::THIN_PRISM:
-        case CameraBase::DistortionModel::UNKNOWN:
-        default:
-          XR_LOG_WARN(
-              "PnPSolver: distortion model not natively supported (%d). "
-              "TODO: undistort to pinhole first, then call PnP with NONE.",
-              int(model));
-          break;
-      }
-      return dc;
-    }
+    uint32_t width{};  ///< 图像宽度，单位像素。
+    uint32_t height{};  ///< 图像高度，单位像素。
+    uint32_t step{};  ///< 每行字节数，即 stride。
+    Encoding encoding{};  ///< 像素编码格式。
+    std::array<double, 9> camera_matrix;  ///< 3x3 相机内参矩阵 K，按行优先存储。
+    DistortionModel distortion_model{};  ///< 畸变模型类型。
+    std::array<double, 14> distortion_coefficients;  ///< 畸变参数，布局跟随 ROS CameraInfo。
+    std::array<double, 9> rectification_matrix;  ///< 3x3 校正旋转矩阵 R，按行优先存储。
+    std::array<double, 12> projection_matrix;  ///< 3x4 投影矩阵 P，按行优先存储。
   };
 
-  CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera")
-      : name_(name), cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this))
+  /**
+   * @struct PnPDistCoeffs
+   * @brief PnP 使用的固定尺寸畸变系数描述。
+   *
+   * @note 这里保持为纯静态数据，便于编译期生成，再由运行时封装成 `cv::Mat`。
+   */
+  struct PnPDistCoeffs
+  {
+    std::array<double, 8> values{};  ///< 当前 PnP 后端会消费的畸变系数。
+    uint8_t size{};  ///< `values` 中有效系数个数。
+    bool uses_rational_polynomial_extension{};  ///< 是否命中 8 项 rational 扩展路径。
+    bool requires_undistort_first{};  ///< 当前模型是否应先去畸变再进入 PnP。
+  };
+
+  /**
+   * @brief 按当前静态相机模型生成 PnP 所需的固定畸变系数描述。
+   *
+   * @note 当前只直接支持 OpenCV 常用 pinhole / rational 两类输入。
+   *       其他模型后续应先做去畸变，再按无畸变 pinhole 进入 PnP。
+   */
+  [[nodiscard]] static constexpr PnPDistCoeffs BuildPnPDistCoeffs(
+      const CameraInfo& info)
+  {
+    PnPDistCoeffs dc{};
+    switch (info.distortion_model)
+    {
+      case DistortionModel::NONE:
+        break;
+
+      case DistortionModel::PLUMB_BOB:
+        dc.values[0] = info.distortion_coefficients[0];
+        dc.values[1] = info.distortion_coefficients[1];
+        dc.values[2] = info.distortion_coefficients[2];
+        dc.values[3] = info.distortion_coefficients[3];
+        dc.values[4] = info.distortion_coefficients[4];
+        dc.size = 5;
+        break;
+
+      case DistortionModel::RATIONAL_POLYNOMIAL:
+        dc.values[0] = info.distortion_coefficients[0];
+        dc.values[1] = info.distortion_coefficients[1];
+        dc.values[2] = info.distortion_coefficients[2];
+        dc.values[3] = info.distortion_coefficients[3];
+        dc.values[4] = info.distortion_coefficients[4];
+        dc.values[5] = info.distortion_coefficients[5];
+        dc.values[6] = info.distortion_coefficients[6];
+        dc.values[7] = info.distortion_coefficients[7];
+        dc.size = 8;
+        dc.uses_rational_polynomial_extension = true;
+        break;
+
+      case DistortionModel::EQUIDISTANT:
+      case DistortionModel::FOV:
+      case DistortionModel::OMNI:
+      case DistortionModel::EXTENDED_UNIFIED:
+      case DistortionModel::DOUBLE_SPHERE:
+      case DistortionModel::THIN_PRISM:
+      case DistortionModel::UNKNOWN:
+      default:
+        dc.requires_undistort_first = true;
+        break;
+    }
+    return dc;
+  }
+};
+
+/**
+ * @class CameraBase
+ * @brief 编译期绑定相机静态信息的基类。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+class CameraBase
+{
+ public:
+  using Encoding = CameraTypes::Encoding;
+  using DistortionModel = CameraTypes::DistortionModel;
+  using CameraInfo = CameraTypes::CameraInfo;
+  static constexpr std::size_t image_alignment = 64;
+
+  // 这一份静态相机描述会被整条视觉链共享，后续模块可直接把分辨率、
+  // 内参、畸变模型当作编译期常量使用。
+  static inline constexpr CameraInfo camera_info = CameraInfoV;
+  static constexpr std::size_t image_bytes =
+      static_cast<std::size_t>(camera_info.step) * static_cast<std::size_t>(camera_info.height);
+
+  /**
+   * @struct ImageFrame
+   * @brief 固定尺寸的原始图像帧载荷。
+   */
+  struct alignas(image_alignment) ImageFrame
+  {
+    uint64_t timestamp_us;  ///< 图像时间戳，单位微秒。
+    alignas(image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节负载。
+  };
+
+  /**
+   * @struct ImuStamped
+   * @brief 与图像同步搬运的位姿与惯导采样。
+   */
+  struct ImuStamped
+  {
+    uint64_t timestamp_us;  ///< IMU/位姿时间戳，单位微秒。
+    std::array<float, 4> rotation_wxyz;  ///< 姿态四元数，顺序为 wxyz。
+    std::array<float, 3> translation_xyz;  ///< 相机平移，单位米。
+    std::array<float, 3> angular_velocity_xyz;  ///< 角速度，单位 rad/s。
+    std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
+  };
+
+  /**
+   * @class ImageLeaseSink
+   * @brief 图像写槽位的最小 writable-image lease/commit 边界。
+   *
+   * @note 这里明确只表达“给生产者一块可写图像槽位，提交后再切到下一块”。
+   *       不再暴露 `void* + function pointer` 这种伪通用注册接口。
+   */
+  class ImageLeaseSink
+  {
+   public:
+    virtual ~ImageLeaseSink() = default;
+
+    /// 注册时返回当前可写图像槽位。
+    virtual ImageFrame* AcquireWritableImage() = 0;
+
+    /// 提交当前已写满的图像帧，并返回下一块可写图像槽位。
+    virtual ImageFrame* CommitAndAcquireNextWritableImage(
+        ImageFrame& committed_image) = 0;
+  };
+
+  // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
+  static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
+  static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
+  static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
+  static_assert(image_bytes > 0, "CameraBase requires non-zero image bytes");
+  static_assert(std::is_trivially_copyable_v<ImageFrame>,
+                "CameraBase::ImageFrame must be trivially copyable");
+  static_assert(std::is_standard_layout_v<ImageFrame>,
+                "CameraBase::ImageFrame must be standard layout");
+  static_assert(std::is_trivially_copyable_v<ImuStamped>,
+                "CameraBase::ImuStamped must be trivially copyable");
+  static_assert(std::is_standard_layout_v<ImuStamped>,
+                "CameraBase::ImuStamped must be standard layout");
+  static_assert(alignof(ImageFrame) >= image_alignment,
+                "CameraBase::ImageFrame alignment is too small");
+  static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
+                "CameraBase::ImageFrame image payload must stay aligned");
+
+  CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera",
+             const char* image_topic_name = "camera_image",
+             const char* imu_topic_name = "camera_imu")
+      : name_(name),
+        image_topic_name_(image_topic_name),
+        imu_topic_name_(imu_topic_name),
+        cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this)),
+        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
-  virtual void SetExposure(double exposure) = 0;
+  virtual ~CameraBase() = default;
 
+  virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
 
+  const char* ImageTopicName() const { return image_topic_name_; }
+
+  const char* ImuTopicName() const { return imu_topic_name_; }
+
+  void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
+
+  bool RegisterImageSink(ImageLeaseSink& image_sink)
+  {
+    if (image_sink_registered_.load(std::memory_order_acquire))
+    {
+      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_);
+      return false;
+    }
+
+    ImageFrame* writable_image = image_sink.AcquireWritableImage();
+    if (writable_image == nullptr)
+    {
+      XR_LOG_ERROR("CameraBase(%s): image sink failed to provide writable image",
+                   name_);
+      return false;
+    }
+
+    image_sink_ = &image_sink;
+    current_writable_image_ = writable_image;
+    image_sink_registered_.store(true, std::memory_order_release);
+    return true;
+  }
+
+  bool ImageSinkReady() const
+  {
+    return image_sink_registered_.load(std::memory_order_acquire) &&
+           current_writable_image_ != nullptr;
+  }
+
+  ImageFrame* GetWritableImage()
+  {
+    return ImageSinkReady() ? current_writable_image_ : nullptr;
+  }
+
+  bool CommitImage()
+  {
+    if (!ImageSinkReady() || image_sink_ == nullptr)
+    {
+      return false;
+    }
+
+    ImageFrame* committed_image = current_writable_image_;
+    ImageFrame* next_writable_image =
+        image_sink_->CommitAndAcquireNextWritableImage(*committed_image);
+    if (next_writable_image == nullptr)
+    {
+      XR_LOG_ERROR("CameraBase(%s): image sink returned null writable image after commit",
+                   name_);
+      return false;
+    }
+
+    current_writable_image_ = next_writable_image;
+    return true;
+  }
+
+  // 调试/bring-up 阶段的临时命令入口。
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
@@ -239,7 +334,7 @@ class CameraBase
         self->SetExposure(atof(argv[2]));
         return 0;
       }
-      else if (strcmp(argv[1], "set_gain") == 0)
+      if (strcmp(argv[1], "set_gain") == 0)
       {
         self->SetGain(atof(argv[2]));
         return 0;
@@ -250,11 +345,13 @@ class CameraBase
     return -1;
   }
 
-  static int CommandAdapter(void* instance, int argc, char** argv)
-  {
-    return CommandFun(static_cast<CameraBase*>(instance), argc, argv);
-  }
-
+ protected:
   const char* name_;
+  const char* image_topic_name_;
+  const char* imu_topic_name_;
   LibXR::RamFS::File cmd_file_;
+  LibXR::Topic imu_topic_;
+  ImageLeaseSink* image_sink_{nullptr};
+  ImageFrame* current_writable_image_{nullptr};
+  std::atomic<bool> image_sink_registered_{false};
 };
