@@ -51,5 +51,5 @@ that concrete camera modules use.
   CameraInfo.height`
 - this module keeps the front-half ABI trivial / standard-layout so the shared
   memory boundary stays predictable
-- `CameraTypes::BuildPnPDistCoeffs(...)` provides the current PnP-facing distortion
-  conversion helper
+- `CameraTypes::BuildPnPDistCoeffs(...)` provides the compile-time PnP-facing
+  distortion description helper

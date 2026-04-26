@@ -22,7 +22,6 @@ depends: []
 #include <cstdlib>
 #include <cstring>
 #include <type_traits>
-#include <vector>
 
 /**
  * @class CameraTypes
@@ -95,32 +94,54 @@ class CameraTypes
   };
 
   /**
-   * @brief 按当前静态相机模型生成 PnP 所需的畸变参数向量。
+   * @struct PnPDistCoeffs
+   * @brief PnP 使用的固定尺寸畸变系数描述。
+   *
+   * @note 这里保持为纯静态数据，便于编译期生成，再由运行时封装成 `cv::Mat`。
+   */
+  struct PnPDistCoeffs
+  {
+    std::array<double, 8> values{};  ///< 当前 PnP 后端会消费的畸变系数。
+    uint8_t size{};  ///< `values` 中有效系数个数。
+    bool uses_rational_polynomial_extension{};  ///< 是否命中 8 项 rational 扩展路径。
+    bool requires_undistort_first{};  ///< 当前模型是否应先去畸变再进入 PnP。
+  };
+
+  /**
+   * @brief 按当前静态相机模型生成 PnP 所需的固定畸变系数描述。
    *
    * @note 当前只直接支持 OpenCV 常用 pinhole / rational 两类输入。
    *       其他模型后续应先做去畸变，再按无畸变 pinhole 进入 PnP。
    */
-  static inline std::vector<double> BuildPnPDistCoeffs(const CameraInfo& info)
+  [[nodiscard]] static constexpr PnPDistCoeffs BuildPnPDistCoeffs(
+      const CameraInfo& info)
   {
-    std::vector<double> dc;
+    PnPDistCoeffs dc{};
     switch (info.distortion_model)
     {
       case DistortionModel::NONE:
         break;
 
       case DistortionModel::PLUMB_BOB:
-        dc = {info.distortion_coefficients[0], info.distortion_coefficients[1],
-              info.distortion_coefficients[2], info.distortion_coefficients[3],
-              info.distortion_coefficients[4]};
+        dc.values[0] = info.distortion_coefficients[0];
+        dc.values[1] = info.distortion_coefficients[1];
+        dc.values[2] = info.distortion_coefficients[2];
+        dc.values[3] = info.distortion_coefficients[3];
+        dc.values[4] = info.distortion_coefficients[4];
+        dc.size = 5;
         break;
 
       case DistortionModel::RATIONAL_POLYNOMIAL:
-        dc = {info.distortion_coefficients[0], info.distortion_coefficients[1],
-              info.distortion_coefficients[2], info.distortion_coefficients[3],
-              info.distortion_coefficients[4], info.distortion_coefficients[5],
-              info.distortion_coefficients[6], info.distortion_coefficients[7]};
-        XR_LOG_WARN(
-            "PnPSolver: using 8-term rational; extend to 14 if backend supports.");
+        dc.values[0] = info.distortion_coefficients[0];
+        dc.values[1] = info.distortion_coefficients[1];
+        dc.values[2] = info.distortion_coefficients[2];
+        dc.values[3] = info.distortion_coefficients[3];
+        dc.values[4] = info.distortion_coefficients[4];
+        dc.values[5] = info.distortion_coefficients[5];
+        dc.values[6] = info.distortion_coefficients[6];
+        dc.values[7] = info.distortion_coefficients[7];
+        dc.size = 8;
+        dc.uses_rational_polynomial_extension = true;
         break;
 
       case DistortionModel::EQUIDISTANT:
@@ -131,10 +152,7 @@ class CameraTypes
       case DistortionModel::THIN_PRISM:
       case DistortionModel::UNKNOWN:
       default:
-        XR_LOG_WARN(
-            "PnPSolver: distortion model not natively supported (%d). "
-            "TODO: undistort to pinhole first, then call PnP with NONE.",
-            int(info.distortion_model));
+        dc.requires_undistort_first = true;
         break;
     }
     return dc;
