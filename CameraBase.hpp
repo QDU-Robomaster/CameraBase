@@ -31,100 +31,114 @@ depends: []
 class CameraTypes
 {
  public:
+  /**
+   * @enum Encoding
+   * @brief 图像像素编码格式。
+   */
   enum Encoding : uint8_t
   {
-    INVALID = 0,
-    RGB8,
-    BGR8,
-    RGBA8,
-    BGRA8,
-    RGB16,
-    BGR16,
-    RGBA16,
-    BGRA16,
-    MONO8,
-    MONO16,
-    BAYER_RGGB8,
-    BAYER_GRBG8,
-    BAYER_GBRG8,
-    BAYER_BGGR8,
-    BAYER_RGGB16,
-    BAYER_GRBG16,
-    BAYER_GBRG16,
-    BAYER_BGGR16,
-    YUV422
+    INVALID = 0,   ///< 无效或未初始化的编码占位。
+    RGB8,          ///< 8 位 RGB 三通道。
+    BGR8,          ///< 8 位 BGR 三通道。
+    RGBA8,         ///< 8 位 RGBA 四通道。
+    BGRA8,         ///< 8 位 BGRA 四通道。
+    RGB16,         ///< 16 位 RGB 三通道。
+    BGR16,         ///< 16 位 BGR 三通道。
+    RGBA16,        ///< 16 位 RGBA 四通道。
+    BGRA16,        ///< 16 位 BGRA 四通道。
+    MONO8,         ///< 8 位单通道灰度图。
+    MONO16,        ///< 16 位单通道灰度图。
+    BAYER_RGGB8,   ///< 8 位 Bayer，RGGB 排列。
+    BAYER_GRBG8,   ///< 8 位 Bayer，GRBG 排列。
+    BAYER_GBRG8,   ///< 8 位 Bayer，GBRG 排列。
+    BAYER_BGGR8,   ///< 8 位 Bayer，BGGR 排列。
+    BAYER_RGGB16,  ///< 16 位 Bayer，RGGB 排列。
+    BAYER_GRBG16,  ///< 16 位 Bayer，GRBG 排列。
+    BAYER_GBRG16,  ///< 16 位 Bayer，GBRG 排列。
+    BAYER_BGGR16,  ///< 16 位 Bayer，BGGR 排列。
+    YUV422         ///< 打包 YUV 4:2:2。
   };
 
+  /**
+   * @enum DistortionModel
+   * @brief 相机畸变模型。
+   */
   enum class DistortionModel : uint8_t
   {
-    NONE = 0,
-    PLUMB_BOB,
-    RATIONAL_POLYNOMIAL,
-    EQUIDISTANT,
-    FOV,
-    OMNI,
-    EXTENDED_UNIFIED,
-    DOUBLE_SPHERE,
-    THIN_PRISM,
-    UNKNOWN
+    NONE = 0,             ///< 无畸变模型。
+    PLUMB_BOB,            ///< Brown-Conrady / plumb_bob。
+    RATIONAL_POLYNOMIAL,  ///< OpenCV 扩展有理多项式模型。
+    EQUIDISTANT,          ///< 等距鱼眼模型。
+    FOV,                  ///< FOV 畸变模型。
+    OMNI,                 ///< 统一全向模型。
+    EXTENDED_UNIFIED,     ///< 扩展统一相机模型。
+    DOUBLE_SPHERE,        ///< 双球模型。
+    THIN_PRISM,           ///< 薄棱镜模型。
+    UNKNOWN               ///< 未知或自定义模型。
   };
 
+  /**
+   * @struct CameraInfo
+   * @brief 编译期静态相机描述。
+   */
   struct CameraInfo
   {
-    // Image geometry and row stride in bytes.
-    uint32_t width{};
-    uint32_t height{};
-    uint32_t step{};
-    Encoding encoding{};
-
-    // Standard pinhole camera intrinsics.
-    std::array<double, 9> camera_matrix;
-    DistortionModel distortion_model{};
-
-    // Distortion/rectification/projection layout follows ROS CameraInfo.
-    std::array<double, 14> distortion_coefficients;
-    std::array<double, 9> rectification_matrix;
-    std::array<double, 12> projection_matrix;
-
-    static inline std::vector<double> ToPnPDistCoeffs(
-        DistortionModel model, const std::array<double, 14>& distortion_coeffs)
-    {
-      std::vector<double> dc;
-      switch (model)
-      {
-        case DistortionModel::NONE:
-          break;
-
-        case DistortionModel::PLUMB_BOB:
-          dc = {distortion_coeffs[0], distortion_coeffs[1], distortion_coeffs[2],
-                distortion_coeffs[3], distortion_coeffs[4]};
-          break;
-
-        case DistortionModel::RATIONAL_POLYNOMIAL:
-          dc = {distortion_coeffs[0], distortion_coeffs[1], distortion_coeffs[2],
-                distortion_coeffs[3], distortion_coeffs[4], distortion_coeffs[5],
-                distortion_coeffs[6], distortion_coeffs[7]};
-          XR_LOG_WARN(
-              "PnPSolver: using 8-term rational; extend to 14 if backend supports.");
-          break;
-
-        case DistortionModel::EQUIDISTANT:
-        case DistortionModel::FOV:
-        case DistortionModel::OMNI:
-        case DistortionModel::EXTENDED_UNIFIED:
-        case DistortionModel::DOUBLE_SPHERE:
-        case DistortionModel::THIN_PRISM:
-        case DistortionModel::UNKNOWN:
-        default:
-          XR_LOG_WARN(
-              "PnPSolver: distortion model not natively supported (%d). "
-              "TODO: undistort to pinhole first, then call PnP with NONE.",
-              int(model));
-          break;
-      }
-      return dc;
-    }
+    uint32_t width{};  ///< 图像宽度，单位像素。
+    uint32_t height{};  ///< 图像高度，单位像素。
+    uint32_t step{};  ///< 每行字节数，即 stride。
+    Encoding encoding{};  ///< 像素编码格式。
+    std::array<double, 9> camera_matrix;  ///< 3x3 相机内参矩阵 K，按行优先存储。
+    DistortionModel distortion_model{};  ///< 畸变模型类型。
+    std::array<double, 14> distortion_coefficients;  ///< 畸变参数，布局跟随 ROS CameraInfo。
+    std::array<double, 9> rectification_matrix;  ///< 3x3 校正旋转矩阵 R，按行优先存储。
+    std::array<double, 12> projection_matrix;  ///< 3x4 投影矩阵 P，按行优先存储。
   };
+
+  /**
+   * @brief 按当前静态相机模型生成 PnP 所需的畸变参数向量。
+   *
+   * @note 当前只直接支持 OpenCV 常用 pinhole / rational 两类输入。
+   *       其他模型后续应先做去畸变，再按无畸变 pinhole 进入 PnP。
+   */
+  static inline std::vector<double> BuildPnPDistCoeffs(const CameraInfo& info)
+  {
+    std::vector<double> dc;
+    switch (info.distortion_model)
+    {
+      case DistortionModel::NONE:
+        break;
+
+      case DistortionModel::PLUMB_BOB:
+        dc = {info.distortion_coefficients[0], info.distortion_coefficients[1],
+              info.distortion_coefficients[2], info.distortion_coefficients[3],
+              info.distortion_coefficients[4]};
+        break;
+
+      case DistortionModel::RATIONAL_POLYNOMIAL:
+        dc = {info.distortion_coefficients[0], info.distortion_coefficients[1],
+              info.distortion_coefficients[2], info.distortion_coefficients[3],
+              info.distortion_coefficients[4], info.distortion_coefficients[5],
+              info.distortion_coefficients[6], info.distortion_coefficients[7]};
+        XR_LOG_WARN(
+            "PnPSolver: using 8-term rational; extend to 14 if backend supports.");
+        break;
+
+      case DistortionModel::EQUIDISTANT:
+      case DistortionModel::FOV:
+      case DistortionModel::OMNI:
+      case DistortionModel::EXTENDED_UNIFIED:
+      case DistortionModel::DOUBLE_SPHERE:
+      case DistortionModel::THIN_PRISM:
+      case DistortionModel::UNKNOWN:
+      default:
+        XR_LOG_WARN(
+            "PnPSolver: distortion model not natively supported (%d). "
+            "TODO: undistort to pinhole first, then call PnP with NONE.",
+            int(info.distortion_model));
+        break;
+    }
+    return dc;
+  }
 };
 
 /**
@@ -146,21 +160,30 @@ class CameraBase
   static constexpr std::size_t image_bytes =
       static_cast<std::size_t>(camera_info.step) * static_cast<std::size_t>(camera_info.height);
 
+  /**
+   * @struct ImageFrame
+   * @brief 固定尺寸的原始图像帧载荷。
+   */
   struct alignas(image_alignment) ImageFrame
   {
-    uint64_t timestamp_us;
-    alignas(image_alignment) std::array<uint8_t, image_bytes> data;
+    uint64_t timestamp_us;  ///< 图像时间戳，单位微秒。
+    alignas(image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节负载。
   };
 
+  /**
+   * @struct ImuStamped
+   * @brief 与图像同步搬运的位姿与惯导采样。
+   */
   struct ImuStamped
   {
-    uint64_t timestamp_us;
-    std::array<float, 4> rotation_wxyz;
-    std::array<float, 3> translation_xyz;
-    std::array<float, 3> angular_velocity_xyz;
-    std::array<float, 3> linear_acceleration_xyz;
+    uint64_t timestamp_us;  ///< IMU/位姿时间戳，单位微秒。
+    std::array<float, 4> rotation_wxyz;  ///< 姿态四元数，顺序为 wxyz。
+    std::array<float, 3> translation_xyz;  ///< 相机平移，单位米。
+    std::array<float, 3> angular_velocity_xyz;  ///< 角速度，单位 rad/s。
+    std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
   };
 
+  /// 图像生产者提交一帧后，用于切换到下一个可写槽位的回调。
   using ImageCommitCallback = ImageFrame* (*)(void* image_sink_context);
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
@@ -251,7 +274,7 @@ class CameraBase
     return true;
   }
 
-  // bring-up 阶段的临时命令入口。
+  // 调试/bring-up 阶段的临时命令入口。
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
