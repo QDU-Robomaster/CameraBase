@@ -208,7 +208,6 @@ class CameraBase
   struct GyroStamped
   {
     uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
-    uint32_t sensor_sequence{};      ///< 传感器侧顺序号。
     std::array<float, 3> angular_velocity_xyz{};  ///< 角速度，单位 rad/s。
   };
 
@@ -219,7 +218,6 @@ class CameraBase
   struct AcclStamped
   {
     uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
-    uint32_t sensor_sequence{};      ///< 传感器侧顺序号。
     std::array<float, 3> linear_acceleration_xyz{};  ///< 线加速度，单位 m/s^2。
   };
 
@@ -230,7 +228,6 @@ class CameraBase
   struct QuatStamped
   {
     uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
-    uint32_t sensor_sequence{};      ///< 传感器侧顺序号。
     std::array<float, 4> rotation_wxyz{};  ///< 姿态四元数，顺序为 wxyz。
   };
 
@@ -241,9 +238,7 @@ class CameraBase
   struct ImageEvent
   {
     uint64_t sensor_timestamp_us{};  ///< 相机侧时间基下的图像采集/曝光参考时刻，单位微秒。
-    uint32_t image_sequence{};       ///< 图像顺序号。
     uint32_t sensor_step_index{};    ///< 该图像对应的下位侧 step 索引。
-    uint32_t sync_cmd_id{};          ///< 触发本帧探针的同步命令编号，0 表示普通帧。
   };
 
   /**
@@ -252,7 +247,7 @@ class CameraBase
    */
   struct SensorSyncCmd
   {
-    uint32_t cmd_id{};  ///< 本次同步命令编号，采集端应原样回填到探针锚点帧。
+    uint8_t reserved{};  ///< 一次性探针触发命令，负载当前保留未用。
   };
 
   /// 图像生产者提交一帧后，用于切换到下一个可写槽位的回调。
