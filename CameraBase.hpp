@@ -207,7 +207,7 @@ class CameraBase
    */
   struct GyroStamped
   {
-    uint64_t sensor_timestamp_us{};  ///< 传感器采样时刻，单位微秒。
+    uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
     uint32_t sensor_sequence{};      ///< 传感器侧顺序号。
     std::array<float, 3> angular_velocity_xyz{};  ///< 角速度，单位 rad/s。
   };
@@ -218,7 +218,7 @@ class CameraBase
    */
   struct AcclStamped
   {
-    uint64_t sensor_timestamp_us{};  ///< 传感器采样时刻，单位微秒。
+    uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
     uint32_t sensor_sequence{};      ///< 传感器侧顺序号。
     std::array<float, 3> linear_acceleration_xyz{};  ///< 线加速度，单位 m/s^2。
   };
@@ -229,7 +229,7 @@ class CameraBase
    */
   struct QuatStamped
   {
-    uint64_t sensor_timestamp_us{};  ///< 传感器采样时刻，单位微秒。
+    uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
     uint32_t sensor_sequence{};      ///< 传感器侧顺序号。
     std::array<float, 4> rotation_wxyz{};  ///< 姿态四元数，顺序为 wxyz。
   };
@@ -240,24 +240,19 @@ class CameraBase
    */
   struct ImageEvent
   {
-    uint64_t sensor_timestamp_us{};  ///< 相机侧图像采集/曝光参考时刻，单位微秒。
+    uint64_t sensor_timestamp_us{};  ///< 相机侧时间基下的图像采集/曝光参考时刻，单位微秒。
     uint32_t image_sequence{};       ///< 图像顺序号。
     uint32_t sensor_step_index{};    ///< 该图像对应的下位侧 step 索引。
+    uint32_t sync_cmd_id{};          ///< 触发本帧探针的同步命令编号，0 表示普通帧。
   };
 
   /**
-   * @struct SyncConfig
-   * @brief 由同步模块下发给采集端的同步/描点配置。
+   * @struct SensorSyncCmd
+   * @brief 由同步模块下发给采集端的一次性同步探针命令。
    */
-  struct SyncConfig
+  struct SensorSyncCmd
   {
-    uint16_t image_divisor_steps{1};   ///< 图像发布分频，表示每 N 个 step 发布一帧。
-    uint16_t image_phase_steps{0};     ///< 图像发布相位，范围 [0, N)。
-    int32_t offset_us{0};              ///< 同步偏移，单位微秒。
-    uint32_t search_window_frames{6};  ///< 同步搜索窗口。
-    uint32_t image_timeout_ms{200};    ///< 图像超时。
-    uint32_t imu_timeout_ms{100};      ///< IMU 超时。
-    uint32_t relock_confirm_frames{3}; ///< 重新锁定所需连续确认帧数。
+    uint32_t cmd_id{};  ///< 本次同步命令编号，采集端应原样回填到探针锚点帧。
   };
 
   /// 图像生产者提交一帧后，用于切换到下一个可写槽位的回调。
@@ -292,10 +287,10 @@ class CameraBase
                 "CameraBase::ImageEvent must be trivially copyable");
   static_assert(std::is_standard_layout_v<ImageEvent>,
                 "CameraBase::ImageEvent must be standard layout");
-  static_assert(std::is_trivially_copyable_v<SyncConfig>,
-                "CameraBase::SyncConfig must be trivially copyable");
-  static_assert(std::is_standard_layout_v<SyncConfig>,
-                "CameraBase::SyncConfig must be standard layout");
+  static_assert(std::is_trivially_copyable_v<SensorSyncCmd>,
+                "CameraBase::SensorSyncCmd must be trivially copyable");
+  static_assert(std::is_standard_layout_v<SensorSyncCmd>,
+                "CameraBase::SensorSyncCmd must be standard layout");
   static_assert(alignof(ImageFrame) >= image_alignment,
                 "CameraBase::ImageFrame alignment is too small");
   static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
