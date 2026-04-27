@@ -48,6 +48,8 @@
 
 - `GyroStamped / AcclStamped / QuatStamped / ImageEvent` 里的 `sensor_timestamp_us`
   都是“各自传感器侧时间基”下的时间戳。
+- 这些时间戳与同步后 `ImuStamped / ImageFrame` 的 `timestamp_us`
+  统一使用 `LibXR::MicrosecondTimestamp` 表达，ABI 仍保持 64 位微秒时间戳。
 - 这些时间戳只保证在**各自数据域内部**可比较，不能直接把图像域时间戳和 IMU
   域时间戳拿来做跨域最近邻匹配。
 - 跨域同步关系应先通过专门的同步策略锁定，再在 IMU 域内使用 `offset`
@@ -59,6 +61,10 @@
 ## 备注
 
 - 图像字节数在编译期由 `CameraInfo.step * CameraInfo.height` 推导。
-- 这个模块刻意把 ABI 保持成平凡类型 / 标准布局，便于共享内存与 topic 搬运。
+- 图像 sink 切槽回调现在使用 `LibXR::Callback<ImageFrame*&>`，
+  不再单独保留裸函数指针 + context。
+- `name / image_topic_name / imu_topic_name` 内部保存为 `std::string_view`，
+  仍保留 `const char*` getter 便于现有模块继续接 C 风格接口。
+- 这个模块刻意把 ABI 保持成固定尺寸 / 标准布局，便于共享内存与 topic 搬运。
 - `CameraTypes::BuildPnPDistCoeffs(...)` 是编译期静态转换 helper。
   推荐在静态相机信息定义旁直接生成并缓存结果，而不是在运行时反复构造。

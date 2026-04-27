@@ -15,12 +15,12 @@ depends: []
 #include "logger.hpp"
 #include "ramfs.hpp"
 
-#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <type_traits>
 
 /**
@@ -184,7 +184,7 @@ class CameraBase
    */
   struct alignas(image_alignment) ImageFrame
   {
-    uint64_t timestamp_us;  ///< 图像时间戳，单位微秒。
+    LibXR::MicrosecondTimestamp timestamp_us;  ///< 图像时间戳，单位微秒。
     alignas(image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节负载。
   };
 
@@ -194,7 +194,7 @@ class CameraBase
    */
   struct ImuStamped
   {
-    uint64_t timestamp_us;  ///< IMU/位姿时间戳，单位微秒。
+    LibXR::MicrosecondTimestamp timestamp_us;  ///< IMU/位姿时间戳，单位微秒。
     std::array<float, 4> rotation_wxyz;  ///< 姿态四元数，顺序为 wxyz。
     std::array<float, 3> translation_xyz;  ///< 相机平移，单位米。
     std::array<float, 3> angular_velocity_xyz;  ///< 角速度，单位 rad/s。
@@ -207,7 +207,7 @@ class CameraBase
    */
   struct GyroStamped
   {
-    uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
+    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
     std::array<float, 3> angular_velocity_xyz{};  ///< 角速度，单位 rad/s。
   };
 
@@ -217,7 +217,7 @@ class CameraBase
    */
   struct AcclStamped
   {
-    uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
+    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
     std::array<float, 3> linear_acceleration_xyz{};  ///< 线加速度，单位 m/s^2。
   };
 
@@ -227,7 +227,7 @@ class CameraBase
    */
   struct QuatStamped
   {
-    uint64_t sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
+    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
     std::array<float, 4> rotation_wxyz{};  ///< 姿态四元数，顺序为 wxyz。
   };
 
@@ -237,7 +237,7 @@ class CameraBase
    */
   struct ImageEvent
   {
-    uint64_t sensor_timestamp_us{};  ///< 相机侧时间基下的图像采集/曝光参考时刻，单位微秒。
+    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 相机侧时间基下的图像采集/曝光参考时刻，单位微秒。
     uint32_t sensor_step_index{};    ///< 该图像对应的下位侧 step 索引。
   };
 
@@ -251,35 +251,29 @@ class CameraBase
   };
 
   /// 图像生产者提交一帧后，用于切换到下一个可写槽位的回调。
-  using ImageCommitCallback = ImageFrame* (*)(void* image_sink_context);
+  using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
+  static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
+                "CameraBase timestamp ABI must stay 64-bit");
+  static_assert(alignof(LibXR::MicrosecondTimestamp) == alignof(uint64_t),
+                "CameraBase timestamp ABI alignment changed");
+  static_assert(std::is_standard_layout_v<LibXR::MicrosecondTimestamp>,
+                "CameraBase timestamp wrapper must stay standard layout");
   static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
   static_assert(image_bytes > 0, "CameraBase requires non-zero image bytes");
-  static_assert(std::is_trivially_copyable_v<ImageFrame>,
-                "CameraBase::ImageFrame must be trivially copyable");
   static_assert(std::is_standard_layout_v<ImageFrame>,
                 "CameraBase::ImageFrame must be standard layout");
-  static_assert(std::is_trivially_copyable_v<ImuStamped>,
-                "CameraBase::ImuStamped must be trivially copyable");
   static_assert(std::is_standard_layout_v<ImuStamped>,
                 "CameraBase::ImuStamped must be standard layout");
-  static_assert(std::is_trivially_copyable_v<GyroStamped>,
-                "CameraBase::GyroStamped must be trivially copyable");
   static_assert(std::is_standard_layout_v<GyroStamped>,
                 "CameraBase::GyroStamped must be standard layout");
-  static_assert(std::is_trivially_copyable_v<AcclStamped>,
-                "CameraBase::AcclStamped must be trivially copyable");
   static_assert(std::is_standard_layout_v<AcclStamped>,
                 "CameraBase::AcclStamped must be standard layout");
-  static_assert(std::is_trivially_copyable_v<QuatStamped>,
-                "CameraBase::QuatStamped must be trivially copyable");
   static_assert(std::is_standard_layout_v<QuatStamped>,
                 "CameraBase::QuatStamped must be standard layout");
-  static_assert(std::is_trivially_copyable_v<ImageEvent>,
-                "CameraBase::ImageEvent must be trivially copyable");
   static_assert(std::is_standard_layout_v<ImageEvent>,
                 "CameraBase::ImageEvent must be standard layout");
   static_assert(std::is_trivially_copyable_v<SensorSyncCmd>,
@@ -291,14 +285,14 @@ class CameraBase
   static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
                 "CameraBase::ImageFrame image payload must stay aligned");
 
-  CameraBase(LibXR::HardwareContainer& hw, const char* name = "camera",
-             const char* image_topic_name = "camera_image",
-             const char* imu_topic_name = "camera_imu")
+  CameraBase(LibXR::HardwareContainer& hw, std::string_view name = "camera",
+             std::string_view image_topic_name = "camera_image",
+             std::string_view imu_topic_name = "camera_imu")
       : name_(name),
         image_topic_name_(image_topic_name),
         imu_topic_name_(imu_topic_name),
-        cmd_file_(LibXR::RamFS::CreateFile(name, CommandFun, this)),
-        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_))
+        cmd_file_(LibXR::RamFS::CreateFile(name_.data(), CommandFun, this)),
+        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.data()))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
@@ -308,54 +302,55 @@ class CameraBase
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
 
-  const char* Name() const { return name_; }
+  std::string_view NameView() const { return name_; }
+  const char* Name() const { return name_.data(); }
 
-  const char* ImageTopicName() const { return image_topic_name_; }
+  std::string_view ImageTopicNameView() const { return image_topic_name_; }
+  const char* ImageTopicName() const { return image_topic_name_.data(); }
 
-  const char* ImuTopicName() const { return imu_topic_name_; }
+  std::string_view ImuTopicNameView() const { return imu_topic_name_; }
+  const char* ImuTopicName() const { return imu_topic_name_.data(); }
 
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
-  bool RegisterImageSink(void* image_sink_context, ImageFrame* initial_image,
-                         ImageCommitCallback commit_callback)
+  bool RegisterImageSink(ImageFrame* initial_image, ImageCommitCallback commit_callback)
   {
-    if (image_sink_context == nullptr || initial_image == nullptr || commit_callback == nullptr)
+    if (initial_image == nullptr || commit_callback.Empty())
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink registration got null argument", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink registration got invalid argument", name_.data());
       return false;
     }
-    if (image_sink_registered_.load(std::memory_order_acquire))
+    if (!image_commit_callback_.Empty())
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_.data());
       return false;
     }
 
-    image_sink_context_ = image_sink_context;
     writable_image_ = initial_image;
     image_commit_callback_ = commit_callback;
-    image_sink_registered_.store(true, std::memory_order_release);
     return true;
   }
 
   bool ImageSinkReady() const
   {
-    return image_sink_registered_.load(std::memory_order_acquire) &&
-           writable_image_ != nullptr;
+    return !image_commit_callback_.Empty() && writable_image_ != nullptr;
   }
 
   ImageFrame* GetWritableImage() { return ImageSinkReady() ? writable_image_ : nullptr; }
 
   bool CommitImage()
   {
-    if (!ImageSinkReady() || image_commit_callback_ == nullptr)
+    if (!ImageSinkReady() || image_commit_callback_.Empty())
     {
       return false;
     }
 
-    ImageFrame* next_image = image_commit_callback_(image_sink_context_);
+    ImageFrame* next_image = nullptr;
+    image_commit_callback_.Run(false, next_image);
     if (next_image == nullptr)
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image", name_);
+      XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image",
+                   name_.data());
       return false;
     }
 
@@ -368,7 +363,7 @@ class CameraBase
   {
     if (argc == 1)
     {
-      LibXR::STDIO::Printf("Camera: %s\n\n", self->name_);
+      LibXR::STDIO::Printf("Camera: %s\n\n", self->name_.data());
       LibXR::STDIO::Printf("Usage:\r\n");
       LibXR::STDIO::Printf("  set_exposure <exposure>\r\n");
       LibXR::STDIO::Printf("  set_gain <gain>\r\n");
@@ -393,13 +388,11 @@ class CameraBase
   }
 
  protected:
-  const char* name_;
-  const char* image_topic_name_;
-  const char* imu_topic_name_;
+  std::string_view name_;
+  std::string_view image_topic_name_;
+  std::string_view imu_topic_name_;
   LibXR::RamFS::File cmd_file_;
   LibXR::Topic imu_topic_;
-  void* image_sink_context_{nullptr};
   ImageFrame* writable_image_{nullptr};
-  ImageCommitCallback image_commit_callback_{nullptr};
-  std::atomic<bool> image_sink_registered_{false};
+  ImageCommitCallback image_commit_callback_{};
 };
