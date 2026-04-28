@@ -61,8 +61,8 @@
 - 图像字节数在编译期由 `CameraInfo.step * CameraInfo.height` 推导。
 - 图像 sink 切槽回调现在使用 `LibXR::Callback<ImageFrame*&>`，
   不再单独保留裸函数指针 + context。
-- `name / image_topic_name / imu_topic_name` 由基类自有保存，避免派生模块传入临时
-  字符串后出现悬空引用；对外仍保留 `string_view` 与 `const char*` getter。
+- `name / image_topic_name / imu_topic_name` 构造入口使用 `std::string_view`，基类内部
+  自有保存一份，避免派生模块或装配代码传入临时字符串后出现悬空引用。
 - 这个模块刻意把 ABI 保持成固定尺寸 / 标准布局，便于共享内存与 topic 搬运。
 - `CameraTypes::BuildPnPDistCoeffs(...)` 是编译期静态转换 helper。
   推荐在静态相机信息定义旁直接生成并缓存结果，而不是在运行时反复构造。
