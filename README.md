@@ -5,7 +5,7 @@
 它本身不实现具体驱动，只负责定义：
 
 - 编译期静态相机信息
-- 原始图像 / 原始 IMU / 图像事件的数据结构
+- 原始图像 / 原始 IMU 的数据结构
 - 图像 sink 的注册与提交边界
 
 ## 当前职责
@@ -22,7 +22,6 @@
   - `GyroStamped`
   - `AcclStamped`
   - `QuatStamped`
-  - `ImageEvent`
   - `SensorSyncCmd`
 - 图像 sink API
   - `RegisterImageSink(...)`
@@ -36,17 +35,16 @@
   - 只拥有类型定义、sink 边界和同步后 IMU 发布 helper
 - 具体相机模块，例如 `WebotsCamera<Info>`
   - 填写原始 IMU
-  - 填写 `ImageEvent`
   - 把图像写进 `ImageFrame`
   - 调用 `CommitImage()`
 - `CameraFrameSync<Info>`
   - 承接图像 lease
-  - 处理原始 `gyro / accl / quat / image_event`
+  - 处理原始 `gyro / accl / quat`
   - 发布同步后的 `ImuStamped`
 
 ## 同步相关约定
 
-- `GyroStamped / AcclStamped / QuatStamped / ImageEvent` 里的 `sensor_timestamp_us`
+- `GyroStamped / AcclStamped / QuatStamped` 里的 `sensor_timestamp_us`
   都是“各自传感器侧时间基”下的时间戳。
 - 这些时间戳与同步后 `ImuStamped / ImageFrame` 的 `timestamp_us`
   统一使用 `LibXR::MicrosecondTimestamp` 表达，ABI 仍保持 64 位微秒时间戳。
@@ -55,16 +53,16 @@
 - 跨域同步关系应先通过专门的同步策略锁定，再在 IMU 域内使用 `offset`
   推导最终样本。
 - `SensorSyncCmd` 是一次性同步探针命令。
-- 当前约定下，采集端只需要临时改变一次图像发布节拍；主机侧通过 `image_event`
-  的到达时间差变化识别探针帧，不依赖显式 `seq/id` 回填。
+- 当前约定下，采集端只需要临时改变一次图像发布节拍；同步模块通过图像
+  `ImageFrame::timestamp_us` 的周期变化识别探针帧，不依赖显式 `seq/id` 回填。
 
 ## 备注
 
 - 图像字节数在编译期由 `CameraInfo.step * CameraInfo.height` 推导。
 - 图像 sink 切槽回调现在使用 `LibXR::Callback<ImageFrame*&>`，
   不再单独保留裸函数指针 + context。
-- `name / image_topic_name / imu_topic_name` 内部保存为 `std::string_view`，
-  仍保留 `const char*` getter 便于现有模块继续接 C 风格接口。
+- `name / image_topic_name / imu_topic_name` 由基类自有保存，避免派生模块传入临时
+  字符串后出现悬空引用；对外仍保留 `string_view` 与 `const char*` getter。
 - 这个模块刻意把 ABI 保持成固定尺寸 / 标准布局，便于共享内存与 topic 搬运。
 - `CameraTypes::BuildPnPDistCoeffs(...)` 是编译期静态转换 helper。
   推荐在静态相机信息定义旁直接生成并缓存结果，而不是在运行时反复构造。

@@ -20,6 +20,7 @@ depends: []
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <type_traits>
 
@@ -232,16 +233,6 @@ class CameraBase
   };
 
   /**
-   * @struct ImageEvent
-   * @brief 图像事件。这里只描述图像时间线上“发生了一帧”，不保证 payload 仍可被消费。
-   */
-  struct ImageEvent
-  {
-    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 相机侧时间基下的图像采集/曝光参考时刻，单位微秒。
-    uint32_t sensor_step_index{};    ///< 该图像对应的下位侧 step 索引。
-  };
-
-  /**
    * @struct SensorSyncCmd
    * @brief 由同步模块下发给采集端的一次性同步探针命令。
    */
@@ -274,8 +265,6 @@ class CameraBase
                 "CameraBase::AcclStamped must be standard layout");
   static_assert(std::is_standard_layout_v<QuatStamped>,
                 "CameraBase::QuatStamped must be standard layout");
-  static_assert(std::is_standard_layout_v<ImageEvent>,
-                "CameraBase::ImageEvent must be standard layout");
   static_assert(std::is_trivially_copyable_v<SensorSyncCmd>,
                 "CameraBase::SensorSyncCmd must be trivially copyable");
   static_assert(std::is_standard_layout_v<SensorSyncCmd>,
@@ -291,8 +280,8 @@ class CameraBase
       : name_(name),
         image_topic_name_(image_topic_name),
         imu_topic_name_(imu_topic_name),
-        cmd_file_(LibXR::RamFS::CreateFile(name_.data(), CommandFun, this)),
-        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.data()))
+        cmd_file_(LibXR::RamFS::CreateFile(name_.c_str(), CommandFun, this)),
+        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
@@ -303,13 +292,13 @@ class CameraBase
   virtual void SetGain(double gain) = 0;
 
   std::string_view NameView() const { return name_; }
-  const char* Name() const { return name_.data(); }
+  const char* Name() const { return name_.c_str(); }
 
   std::string_view ImageTopicNameView() const { return image_topic_name_; }
-  const char* ImageTopicName() const { return image_topic_name_.data(); }
+  const char* ImageTopicName() const { return image_topic_name_.c_str(); }
 
   std::string_view ImuTopicNameView() const { return imu_topic_name_; }
-  const char* ImuTopicName() const { return imu_topic_name_.data(); }
+  const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
 
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
@@ -317,12 +306,12 @@ class CameraBase
   {
     if (initial_image == nullptr || commit_callback.Empty())
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink registration got invalid argument", name_.data());
+      XR_LOG_ERROR("CameraBase(%s): image sink registration got invalid argument", name_.c_str());
       return false;
     }
     if (!image_commit_callback_.Empty())
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_.data());
+      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_.c_str());
       return false;
     }
 
@@ -350,7 +339,7 @@ class CameraBase
     if (next_image == nullptr)
     {
       XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image",
-                   name_.data());
+                   name_.c_str());
       return false;
     }
 
@@ -363,7 +352,7 @@ class CameraBase
   {
     if (argc == 1)
     {
-      LibXR::STDIO::Printf("Camera: %s\n\n", self->name_.data());
+      LibXR::STDIO::Printf("Camera: %s\n\n", self->name_.c_str());
       LibXR::STDIO::Printf("Usage:\r\n");
       LibXR::STDIO::Printf("  set_exposure <exposure>\r\n");
       LibXR::STDIO::Printf("  set_gain <gain>\r\n");
@@ -388,9 +377,9 @@ class CameraBase
   }
 
  protected:
-  std::string_view name_;
-  std::string_view image_topic_name_;
-  std::string_view imu_topic_name_;
+  std::string name_;
+  std::string image_topic_name_;
+  std::string imu_topic_name_;
   LibXR::RamFS::File cmd_file_;
   LibXR::Topic imu_topic_;
   ImageFrame* writable_image_{nullptr};
