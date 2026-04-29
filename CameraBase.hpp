@@ -352,10 +352,10 @@ class CameraBase
   {
     if (argc == 1)
     {
-      LibXR::STDIO::Printf("Camera: %s\n\n", self->name_.c_str());
-      LibXR::STDIO::Printf("Usage:\r\n");
-      LibXR::STDIO::Printf("  set_exposure <exposure>\r\n");
-      LibXR::STDIO::Printf("  set_gain <gain>\r\n");
+      LibXR::STDIO::Printf<"Camera: %s\n\n">(self->name_.c_str());
+      LibXR::STDIO::Printf<"Usage:\r\n">();
+      LibXR::STDIO::Printf<"  set_exposure <exposure>\r\n">();
+      LibXR::STDIO::Printf<"  set_gain <gain>\r\n">();
       return 0;
     }
     else if (argc == 3)
@@ -372,7 +372,7 @@ class CameraBase
       }
     }
 
-    LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
+    LibXR::STDIO::Printf<"Unknown command: %s\n">(argv[1]);
     return -1;
   }
 
