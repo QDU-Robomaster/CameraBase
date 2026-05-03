@@ -61,10 +61,10 @@ class CameraBaseCalibration
     double max_homography_rms = 2.5;
     double max_reprojection_rms = 3.0;
     double min_sharpness_score = 30.0;
-    double min_sharpness_best_ratio = 0.30;
-    double min_center_delta_norm = 0.035;
-    double min_scale_delta_log = 0.08;
-    double min_angle_delta_deg = 6.0;
+    double min_sharpness_best_ratio = 0.20;
+    double min_center_delta_norm = 0.020;
+    double min_scale_delta_log = 0.05;
+    double min_angle_delta_deg = 3.0;
   };
 
   bool Start(std::string_view marker_size_text, int cols, int rows,
