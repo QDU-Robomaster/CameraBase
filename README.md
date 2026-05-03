@@ -5,7 +5,7 @@
 它本身不实现具体驱动，只负责定义：
 
 - 编译期静态相机信息
-- 原始图像 / 原始 IMU 的数据结构
+- 原始图像和同步后 IMU 的数据结构
 - 图像 sink 的注册与提交边界
 
 ## 当前职责
@@ -18,11 +18,8 @@
   - 供具体相机模块直接写入，再交给后续共享图像发布环节
 - `CameraBase<Info>::ImuStamped`
   - 最终对下游发布的同步后 IMU 数据
-- 原始传感器 ABI
-  - `GyroStamped`
-  - `AcclStamped`
-  - `QuatStamped`
-  - `SensorSyncCmd`
+- `CameraBase<Info>::SensorSyncCmd`
+  - 同步模块下发给采集端的一次性同步探针命令
 - 图像 sink API
   - `RegisterImageSink(...)`
   - `ImageSinkReady()`
@@ -34,22 +31,22 @@
 - `CameraBase<Info>`
   - 只拥有类型定义、sink 边界和同步后 IMU 发布 helper
 - 具体相机模块，例如 `WebotsCamera<Info>`
-  - 填写原始 IMU
+  - 发布原始传感器数据
   - 把图像写进 `ImageFrame`
   - 调用 `CommitImage()`
 - `CameraFrameSync<Info>`
   - 承接图像 lease
-  - 处理原始 `gyro / accl / quat`
+  - 处理原始 `gyro / accl / quat`，并负责对齐
   - 发布同步后的 `ImuStamped`
 
 ## 同步相关约定
 
-- `GyroStamped / AcclStamped / QuatStamped` 里的 `sensor_timestamp_us`
-  都是“各自传感器侧时间基”下的时间戳。
-- 这些时间戳与同步后 `ImuStamped / ImageFrame` 的 `timestamp_us`
-  统一使用 `LibXR::MicrosecondTimestamp` 表达，ABI 仍保持 64 位微秒时间戳。
-- 这些时间戳只保证在**各自数据域内部**可比较，不能直接把图像域时间戳和 IMU
-  域时间戳拿来做跨域最近邻匹配。
+- 原始 `gyro / accl / quat` 的采样时刻由发布端通过 Topic timestamp 携带；
+  `CameraBase` 不再为三路原始传感器定义额外 wrapper。
+- `ImuStamped / ImageFrame` 的 `timestamp_us` 统一使用
+  `LibXR::MicrosecondTimestamp` 表达，ABI 仍保持 64 位微秒时间戳。
+- 原始传感器时间戳只保证在 IMU 数据域内部可比较，不能直接把图像域时间戳和
+  IMU 域时间戳拿来做跨域最近邻匹配。
 - 跨域同步关系应先通过专门的同步策略锁定，再在 IMU 域内使用 `offset`
   推导最终样本。
 - `SensorSyncCmd` 是一次性同步探针命令。

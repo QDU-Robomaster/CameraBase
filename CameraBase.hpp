@@ -203,36 +203,6 @@ class CameraBase
   };
 
   /**
-   * @struct GyroStamped
-   * @brief 原始陀螺仪采样，时间戳来自传感器侧采样时刻而非主机到达时刻。
-   */
-  struct GyroStamped
-  {
-    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
-    std::array<float, 3> angular_velocity_xyz{};  ///< 角速度，单位 rad/s。
-  };
-
-  /**
-   * @struct AcclStamped
-   * @brief 原始加速度采样，时间戳来自传感器侧采样时刻。
-   */
-  struct AcclStamped
-  {
-    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
-    std::array<float, 3> linear_acceleration_xyz{};  ///< 线加速度，单位 m/s^2。
-  };
-
-  /**
-   * @struct QuatStamped
-   * @brief 原始姿态四元数采样，时间戳来自传感器侧采样时刻。
-   */
-  struct QuatStamped
-  {
-    LibXR::MicrosecondTimestamp sensor_timestamp_us{};  ///< 传感器侧时间基下的采样时刻，单位微秒。
-    std::array<float, 4> rotation_wxyz{};  ///< 姿态四元数，顺序为 wxyz。
-  };
-
-  /**
    * @struct SensorSyncCmd
    * @brief 由同步模块下发给采集端的一次性同步探针命令。
    */
@@ -259,12 +229,6 @@ class CameraBase
                 "CameraBase::ImageFrame must be standard layout");
   static_assert(std::is_standard_layout_v<ImuStamped>,
                 "CameraBase::ImuStamped must be standard layout");
-  static_assert(std::is_standard_layout_v<GyroStamped>,
-                "CameraBase::GyroStamped must be standard layout");
-  static_assert(std::is_standard_layout_v<AcclStamped>,
-                "CameraBase::AcclStamped must be standard layout");
-  static_assert(std::is_standard_layout_v<QuatStamped>,
-                "CameraBase::QuatStamped must be standard layout");
   static_assert(std::is_trivially_copyable_v<SensorSyncCmd>,
                 "CameraBase::SensorSyncCmd must be trivially copyable");
   static_assert(std::is_standard_layout_v<SensorSyncCmd>,
