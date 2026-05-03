@@ -60,6 +60,11 @@ class CameraBaseCalibration
     uint64_t min_accept_interval_us = 200000;
     double max_homography_rms = 2.5;
     double max_reprojection_rms = 3.0;
+    double min_sharpness_score = 30.0;
+    double min_sharpness_best_ratio = 0.30;
+    double min_center_delta_norm = 0.035;
+    double min_scale_delta_log = 0.08;
+    double min_angle_delta_deg = 6.0;
   };
 
   bool Start(std::string_view marker_size_text, int cols, int rows,
@@ -223,10 +228,13 @@ class CameraBaseCalibration
        << (accepted_views_.size() >= kMinimumCalibrationViews ? 1 : 0)
        << " 已处理=" << processed_frames_
        << " 已检测=" << detected_frames_
+       << " 模糊拒绝=" << sharpness_rejected_frames_
+       << " 重复拒绝=" << duplicate_rejected_frames_
        << " 已截断发布=" << swallowed_frames_
        << " 标定板=" << config_.cols << "x" << config_.rows
        << " 标记mm=" << config_.marker_mm
        << " 方格mm=" << SquareMm(config_)
+       << " 最佳清晰度=" << best_sharpness_score_
        << " 输出=" << output_dir_;
     if (last_rms_ >= 0.0)
     {
@@ -245,6 +253,11 @@ class CameraBaseCalibration
     uint64_t timestamp_us = 0;
     int used_markers = 0;
     double homography_rms = 0.0;
+    double sharpness_score = 0.0;
+    double center_x_norm = 0.0;
+    double center_y_norm = 0.0;
+    double scale_norm = 0.0;
+    double angle_deg = 0.0;
     std::vector<cv::Point3f> object_points;
     std::vector<cv::Point2f> image_points;
   };
@@ -263,6 +276,11 @@ class CameraBaseCalibration
   {
     int used_markers = 0;
     double homography_rms = 0.0;
+    double sharpness_score = 0.0;
+    double center_x_norm = 0.0;
+    double center_y_norm = 0.0;
+    double scale_norm = 0.0;
+    double angle_deg = 0.0;
     std::vector<cv::Point3f> object_points;
     std::vector<cv::Point2f> image_points;
     std::vector<std::vector<cv::Point2f>> marker_corners;
@@ -276,6 +294,7 @@ class CameraBaseCalibration
     uint64_t frame_index = 0;
     int used_markers = 0;
     double homography_rms = 0.0;
+    double sharpness_score = 0.0;
   };
 
   struct CalibrationOutput
@@ -316,6 +335,9 @@ class CameraBaseCalibration
     unsupported_encoding_logged_ = false;
     recommended_views_logged_ = false;
     max_views_logged_ = false;
+    best_sharpness_score_ = 0.0;
+    sharpness_rejected_frames_ = 0;
+    duplicate_rejected_frames_ = 0;
   }
 
   FrameAction PrepareFrame(const uint8_t* data, uint64_t timestamp_us,
@@ -375,8 +397,14 @@ class CameraBaseCalibration
 
     detection.homography_rms =
         HomographyRms(detection.object_points, detection.image_points);
-    return detection.used_markers >= snapshot.config.min_markers &&
-           detection.homography_rms <= snapshot.config.max_homography_rms;
+    if (detection.used_markers < snapshot.config.min_markers ||
+        detection.homography_rms > snapshot.config.max_homography_rms)
+    {
+      return false;
+    }
+
+    FillDetectionQuality(image, detection);
+    return true;
   }
 
   bool StoreDetection(const FrameSnapshot& snapshot, const Detection& detection,
@@ -407,11 +435,32 @@ class CameraBaseCalibration
       return false;
     }
 
+    best_sharpness_score_ = std::max(best_sharpness_score_, detection.sharpness_score);
+    const double sharpness_threshold =
+        std::max(config_.min_sharpness_score,
+                 best_sharpness_score_ * config_.min_sharpness_best_ratio);
+    if (detection.sharpness_score < sharpness_threshold)
+    {
+      ++sharpness_rejected_frames_;
+      return false;
+    }
+
+    if (IsNearDuplicateLocked(detection))
+    {
+      ++duplicate_rejected_frames_;
+      return false;
+    }
+
     View view;
     view.frame_index = snapshot.frame_index;
     view.timestamp_us = snapshot.timestamp_us;
     view.used_markers = detection.used_markers;
     view.homography_rms = detection.homography_rms;
+    view.sharpness_score = detection.sharpness_score;
+    view.center_x_norm = detection.center_x_norm;
+    view.center_y_norm = detection.center_y_norm;
+    view.scale_norm = detection.scale_norm;
+    view.angle_deg = detection.angle_deg;
     view.object_points = detection.object_points;
     view.image_points = detection.image_points;
     accepted_views_.push_back(std::move(view));
@@ -422,10 +471,12 @@ class CameraBaseCalibration
     stored.frame_index = snapshot.frame_index;
     stored.used_markers = detection.used_markers;
     stored.homography_rms = detection.homography_rms;
+    stored.sharpness_score = detection.sharpness_score;
 
-    XR_LOG_INFO("相机标定：接受视角 %llu，标记=%d H-rms=%.3f ts=%llu",
+    XR_LOG_INFO("相机标定：接受视角 %llu，标记=%d H-rms=%.3f 清晰度=%.1f ts=%llu",
                 static_cast<unsigned long long>(accepted_views_.size()),
                 detection.used_markers, detection.homography_rms,
+                detection.sharpness_score,
                 static_cast<unsigned long long>(snapshot.timestamp_us));
 
     if (!recommended_views_logged_ &&
@@ -595,6 +646,149 @@ class CameraBaseCalibration
     return used_markers > 0;
   }
 
+  static cv::Mat MakeGrayImage(const cv::Mat& image)
+  {
+    if (image.channels() == 1)
+    {
+      return image;
+    }
+
+    cv::Mat gray;
+    if (image.channels() == 3)
+    {
+      cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    }
+    else if (image.channels() == 4)
+    {
+      cv::cvtColor(image, gray, cv::COLOR_BGRA2GRAY);
+    }
+    return gray;
+  }
+
+  static double MarkerSharpnessScore(
+      const cv::Mat& image, const std::vector<std::vector<cv::Point2f>>& corners)
+  {
+    const cv::Mat gray = MakeGrayImage(image);
+    if (gray.empty())
+    {
+      return 0.0;
+    }
+
+    cv::Mat marker_mask = cv::Mat::zeros(gray.size(), CV_8UC1);
+    for (const auto& marker : corners)
+    {
+      if (marker.size() < 4)
+      {
+        continue;
+      }
+
+      std::array<cv::Point, 4> polygon{};
+      for (int i = 0; i < 4; ++i)
+      {
+        polygon[static_cast<std::size_t>(i)] =
+            cv::Point{static_cast<int>(std::lround(marker[static_cast<std::size_t>(i)].x)),
+                      static_cast<int>(std::lround(marker[static_cast<std::size_t>(i)].y))};
+      }
+      cv::fillConvexPoly(marker_mask, polygon.data(), static_cast<int>(polygon.size()),
+                         cv::Scalar{255});
+    }
+
+    if (cv::countNonZero(marker_mask) < 16)
+    {
+      return 0.0;
+    }
+
+    cv::dilate(marker_mask, marker_mask, cv::Mat{}, {-1, -1}, 1);
+    cv::Mat laplacian;
+    cv::Laplacian(gray, laplacian, CV_64F, 3);
+
+    cv::Scalar mean;
+    cv::Scalar stddev;
+    cv::meanStdDev(laplacian, mean, stddev, marker_mask);
+    return stddev[0] * stddev[0];
+  }
+
+  static double NormalizeBoardAngle(double angle_deg, const cv::Size2f& size)
+  {
+    if (size.width < size.height)
+    {
+      angle_deg += 90.0;
+    }
+
+    while (angle_deg < 0.0)
+    {
+      angle_deg += 180.0;
+    }
+    while (angle_deg >= 180.0)
+    {
+      angle_deg -= 180.0;
+    }
+    return angle_deg;
+  }
+
+  static double AngleDeltaDeg(double lhs, double rhs)
+  {
+    double delta = std::fabs(lhs - rhs);
+    while (delta >= 180.0)
+    {
+      delta -= 180.0;
+    }
+    return delta > 90.0 ? 180.0 - delta : delta;
+  }
+
+  static void FillDetectionQuality(const cv::Mat& image, Detection& detection)
+  {
+    detection.sharpness_score =
+        MarkerSharpnessScore(image, detection.marker_corners);
+
+    if (detection.image_points.empty() || CameraInfoV.width == 0 ||
+        CameraInfoV.height == 0)
+    {
+      return;
+    }
+
+    const cv::Rect bounds = cv::boundingRect(detection.image_points);
+    const double image_width = static_cast<double>(CameraInfoV.width);
+    const double image_height = static_cast<double>(CameraInfoV.height);
+    detection.center_x_norm =
+        (static_cast<double>(bounds.x) + static_cast<double>(bounds.width) * 0.5) /
+        image_width;
+    detection.center_y_norm =
+        (static_cast<double>(bounds.y) + static_cast<double>(bounds.height) * 0.5) /
+        image_height;
+    detection.scale_norm =
+        std::sqrt(std::max(0.0, static_cast<double>(bounds.area())) /
+                  std::max(1.0, image_width * image_height));
+
+    if (detection.image_points.size() >= 4)
+    {
+      const cv::RotatedRect rect = cv::minAreaRect(detection.image_points);
+      detection.angle_deg = NormalizeBoardAngle(rect.angle, rect.size);
+    }
+  }
+
+  bool IsNearDuplicateLocked(const Detection& detection) const
+  {
+    for (const View& view : accepted_views_)
+    {
+      const double center_delta =
+          std::hypot(detection.center_x_norm - view.center_x_norm,
+                     detection.center_y_norm - view.center_y_norm);
+      const double scale_delta =
+          std::fabs(std::log((detection.scale_norm + 1e-6) /
+                             (view.scale_norm + 1e-6)));
+      const double angle_delta =
+          AngleDeltaDeg(detection.angle_deg, view.angle_deg);
+      if (center_delta < config_.min_center_delta_norm &&
+          scale_delta < config_.min_scale_delta_log &&
+          angle_delta < config_.min_angle_delta_deg)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
   static double HomographyRms(const std::vector<cv::Point3f>& object_points,
                               const std::vector<cv::Point2f>& image_points)
   {
@@ -725,11 +919,49 @@ class CameraBaseCalibration
     return filtered;
   }
 
+  static std::vector<View> FilterBySharpness(const std::vector<View>& views,
+                                             const Config& config)
+  {
+    double best_score = 0.0;
+    for (const View& view : views)
+    {
+      best_score = std::max(best_score, view.sharpness_score);
+    }
+
+    const double threshold =
+        std::max(config.min_sharpness_score,
+                 best_score * config.min_sharpness_best_ratio);
+
+    std::vector<View> filtered;
+    filtered.reserve(views.size());
+    for (const View& view : views)
+    {
+      if (view.sharpness_score >= threshold)
+      {
+        filtered.push_back(view);
+      }
+    }
+    return filtered;
+  }
+
   static bool CalibrateAndWrite(const std::vector<View>& input_views,
                                 const Config& config,
                                 const std::string& output_dir,
                                 CalibrationOutput& output)
   {
+    std::vector<View> calibration_views = FilterBySharpness(input_views, config);
+    if (calibration_views.size() >= kMinimumCalibrationViews &&
+        calibration_views.size() < input_views.size())
+    {
+      XR_LOG_INFO("相机标定：清晰度预筛选保留 %llu/%llu 个视角",
+                  static_cast<unsigned long long>(calibration_views.size()),
+                  static_cast<unsigned long long>(input_views.size()));
+    }
+    else
+    {
+      calibration_views = input_views;
+    }
+
     cv::Mat camera_matrix;
     cv::Mat distortion;
     double rms = 0.0;
@@ -738,7 +970,7 @@ class CameraBaseCalibration
 
     try
     {
-      CalibrateViews(input_views, camera_matrix, distortion, rms, rvecs, tvecs);
+      CalibrateViews(calibration_views, camera_matrix, distortion, rms, rvecs, tvecs);
     }
     catch (const cv::Exception& e)
     {
@@ -746,14 +978,14 @@ class CameraBaseCalibration
       return false;
     }
 
-    std::vector<View> final_views = input_views;
+    std::vector<View> final_views = calibration_views;
     std::vector<double> final_per_view_rms =
-        PerViewRms(input_views, camera_matrix, distortion, rvecs, tvecs);
+        PerViewRms(calibration_views, camera_matrix, distortion, rvecs, tvecs);
 
     const std::vector<View> filtered =
-        FilterByRms(input_views, final_per_view_rms, config.max_reprojection_rms);
+        FilterByRms(calibration_views, final_per_view_rms, config.max_reprojection_rms);
     if (filtered.size() >= kMinimumCalibrationViews &&
-        filtered.size() < input_views.size())
+        filtered.size() < calibration_views.size())
     {
       cv::Mat filtered_camera_matrix;
       cv::Mat filtered_distortion;
@@ -837,6 +1069,7 @@ class CameraBaseCalibration
   {
     std::ofstream csv(path);
     csv << "frame_index,timestamp_us,used_markers,homography_rms,"
+           "sharpness_score,center_x_norm,center_y_norm,scale_norm,angle_deg,"
            "per_view_reprojection_rms\n";
     for (std::size_t i = 0; i < views.size(); ++i)
     {
@@ -844,6 +1077,11 @@ class CameraBaseCalibration
           << views[i].timestamp_us << ","
           << views[i].used_markers << ","
           << views[i].homography_rms << ","
+          << views[i].sharpness_score << ","
+          << views[i].center_x_norm << ","
+          << views[i].center_y_norm << ","
+          << views[i].scale_norm << ","
+          << views[i].angle_deg << ","
           << (i < per_view_rms.size() ? per_view_rms[i] : -1.0) << "\n";
     }
   }
@@ -906,7 +1144,8 @@ class CameraBaseCalibration
     label << "view=" << stored.view_number
           << " markers=" << stored.used_markers
           << " H=" << std::fixed << std::setprecision(3)
-          << stored.homography_rms;
+          << stored.homography_rms
+          << " S=" << std::setprecision(1) << stored.sharpness_score;
     cv::putText(debug, label.str(), {20, 45}, cv::FONT_HERSHEY_SIMPLEX,
                 1.0, {0, 255, 0}, 2, cv::LINE_AA);
 
@@ -947,9 +1186,12 @@ class CameraBaseCalibration
   std::string last_saved_yaml_{};
 
   double last_rms_{-1.0};
+  double best_sharpness_score_{0.0};
   uint64_t raw_frame_index_{0};
   uint64_t swallowed_frames_{0};
   uint64_t processed_frames_{0};
   uint64_t detected_frames_{0};
+  uint64_t sharpness_rejected_frames_{0};
+  uint64_t duplicate_rejected_frames_{0};
   uint64_t last_accept_timestamp_us_{0};
 };
