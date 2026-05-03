@@ -35,12 +35,19 @@ template <CameraTypes::CameraInfo CameraInfoV>
 class CameraBaseCalibration
 {
  public:
+  /// GShang 生成器使用 ArUco original 字典中的 5-bit 有效码元。
   static constexpr int kGShangDictionaryBits = 5;
+  /// 单个 marker 的总码元宽度：5-bit 有效区加一圈白边。
   static constexpr int kGShangMarkerCells = kGShangDictionaryBits + 2;
+  /// 单个棋盘方格的总码元宽度：marker 外再加棋盘留边。
   static constexpr int kGShangSquareCells = kGShangDictionaryBits + 4;
+  /// OpenCV 标定求解前允许保存的最少有效视角数。
   static constexpr int kMinimumCalibrationViews = 8;
+  /// 经验建议视角数；达到后只提示，不自动停止采样。
   static constexpr int kDefaultRecommendedViews = 120;
+  /// 默认最多保留的已接受视角，防止长时间在线采样占用过多内存和磁盘。
   static constexpr int kDefaultMaxStoredViews = 300;
+  /// 当前 CameraInfoV 的像素编码是否能被本标定器零拷贝封装为 cv::Mat。
   static constexpr bool kSupportsImageEncoding =
       CameraInfoV.encoding == CameraTypes::Encoding::BGR8 ||
       CameraInfoV.encoding == CameraTypes::Encoding::RGB8 ||
@@ -48,25 +55,55 @@ class CameraBaseCalibration
       CameraInfoV.encoding == CameraTypes::Encoding::RGBA8 ||
       CameraInfoV.encoding == CameraTypes::Encoding::MONO8;
 
+  /**
+   * @brief 单次在线标定的参数快照。
+   *
+   * 这些参数在 Start() 时根据命令行和经验默认值生成，采样线程只读取快照；
+   * 保存阶段也复制同一份配置，保证输出文件和采样判据一致。
+   */
   struct Config
   {
+    /// 标记黑码区域边长，单位 mm；对应命令 `cali 25mm 8 6` 中的 25mm。
     double marker_mm = 25.0;
+    /// GShang 工具中的标定板列数，也就是棋盘方格列数。
     int cols = 8;
+    /// GShang 工具中的标定板行数，也就是棋盘方格行数。
     int rows = 6;
+    /// 单帧至少需要识别到的有效 marker 数，低于该值不进入采样池。
     int min_markers = 12;
+    /// 建议采满的视角数；达到后提示操作手可以保存。
     int recommended_views = kDefaultRecommendedViews;
+    /// 内存中最多保留的已接受视角数量。
     int max_stored_views = kDefaultMaxStoredViews;
+    /// 图像处理抽帧间隔；所有帧仍被吞掉，但只每 N 帧跑一次检测。
     int process_stride = 3;
+    /// 两个已接受视角之间的最小时间间隔，避免一段静止画面刷满样本。
     uint64_t min_accept_interval_us = 200000;
+    /// 单应性重投影 RMS 上限，用于早期剔除明显错检或严重畸变视角。
     double max_homography_rms = 2.5;
+    /// 标定后单视角重投影 RMS 上限，用于保存前二次剔除离群视角。
     double max_reprojection_rms = 3.0;
+    /// marker 区域拉普拉斯方差绝对下限，用于拒绝明显运动模糊。
     double min_sharpness_score = 30.0;
+    /// 相对本轮最佳清晰度的下限比例，适配不同相机曝光和画面尺度。
     double min_sharpness_best_ratio = 0.20;
+    /// 归一化图像中心变化阈值，小于该值可能是重复姿态。
     double min_center_delta_norm = 0.020;
+    /// 标定板画面尺度对数变化阈值，小于该值可能是重复距离。
     double min_scale_delta_log = 0.05;
+    /// 标定板平面内角度变化阈值，小于该值可能是重复朝向。
     double min_angle_delta_deg = 3.0;
   };
 
+  /**
+   * @brief 启动一轮在线 ChArUco 标定。
+   *
+   * @param marker_size_text marker 黑码边长，支持 `25mm` 或 `25`。
+   * @param cols GShang 标定板列数。
+   * @param rows GShang 标定板行数。
+   * @param camera_name 用于输出目录命名的相机名。
+   * @return true 表示配置、字典、输出目录准备完成，后续帧会被标定流程接管。
+   */
   bool Start(std::string_view marker_size_text, int cols, int rows,
              std::string_view camera_name)
   {
@@ -94,12 +131,14 @@ class CameraBaseCalibration
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    // Start() 持有锁后一次性替换本轮配置，避免采样线程看到半初始化状态。
     config_ = MakeConfig(marker_mm, cols, rows);
     board_ = MakeGShangMarkerMap(config_);
     dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_ARUCO_ORIGINAL);
     detector_params_ = cv::aruco::DetectorParameters::create();
     detector_params_->cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
 
+    // 输出目录在启动阶段创建；后续 debug 图、CSV 和 YAML 都落在同一棵目录。
     output_dir_ = BuildOutputDir(camera_name, config_);
     debug_dir_ = (std::filesystem::path(output_dir_) / "debug").string();
     std::error_code ec;
@@ -113,6 +152,7 @@ class CameraBaseCalibration
 
     accepted_views_.clear();
     ResetCountersLocked();
+    // active_fast_ 是 CommitImage() 热路径的无锁快速判断，active_ 是锁内权威状态。
     active_ = true;
     active_fast_.store(true, std::memory_order_release);
 
@@ -127,6 +167,13 @@ class CameraBaseCalibration
   }
 
   /**
+   * @brief 处理来自 CameraBase::CommitImage() 的一帧图像。
+   *
+   * 标定激活时，本函数无论是否真正跑检测都会吞掉图像，保证采样期间不向
+   * CameraFrameSync 发布相机图像；标定未激活时返回 false 让正常发布路径继续。
+   *
+   * @param data 指向当前图像缓冲区的首地址，生命周期由 CameraBase 当前帧保证。
+   * @param timestamp_us 当前帧的相机时间戳，单位 us。
    * @return true 表示该帧被标定流程接管，正常图像发布必须跳过。
    */
   bool ProcessFrame(const uint8_t* data, uint64_t timestamp_us)
@@ -137,6 +184,7 @@ class CameraBaseCalibration
     }
 
     FrameSnapshot snapshot;
+    // PrepareFrame() 在锁内决定发布/吞帧/处理，并复制检测所需的不可变快照。
     const FrameAction action = PrepareFrame(data, timestamp_us, snapshot);
     if (action == FrameAction::kPublish)
     {
@@ -148,6 +196,7 @@ class CameraBaseCalibration
     }
 
     Detection detection;
+    // MakeImageView() 只封装外部图像内存，不拥有像素数据，不在锁内跑 OpenCV。
     const cv::Mat image = MakeImageView(data);
     if (image.empty())
     {
@@ -167,6 +216,11 @@ class CameraBaseCalibration
     return true;
   }
 
+  /**
+   * @brief 停止当前标定并立即恢复 CameraFrameSync 图像发布。
+   *
+   * 已采到的视角仍保留在内存中，便于 status 查看；不会写出标定文件。
+   */
   void Stop()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -177,6 +231,11 @@ class CameraBaseCalibration
                 output_dir_.c_str());
   }
 
+  /**
+   * @brief 停止采样、运行 OpenCV 标定并写出 YAML/CSV/debug 摘要。
+   *
+   * @return true 表示数值求解和文件输出完成；false 表示视角不足或 OpenCV 求解失败。
+   */
   bool SaveAndStop()
   {
     std::vector<View> views;
@@ -197,6 +256,7 @@ class CameraBaseCalibration
       // 操作手可以调整姿态后重新开始一轮。
       active_ = false;
       active_fast_.store(false, std::memory_order_release);
+      // 复制视角和配置后释放锁，避免耗时的 calibrateCamera 阻塞采样入口。
       views = accepted_views_;
       config = config_;
       output_dir = output_dir_;
@@ -215,6 +275,11 @@ class CameraBaseCalibration
     return true;
   }
 
+  /**
+   * @brief 生成命令行 `cali status` 使用的中文状态摘要。
+   *
+   * @return 包含活动状态、视角数、拒绝计数、标定板尺寸、输出目录和最近 RMS 的文本。
+   */
   std::string StatusString() const
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -244,72 +309,141 @@ class CameraBaseCalibration
   }
 
  private:
+  /// 单个 ArUco marker 在标定板坐标系下的四个三维角点，顺序匹配 OpenCV 检测结果。
   using MarkerCorners = std::array<cv::Point3f, 4>;
+  /// marker id 到三维角点的查表；用于把 GShang 生成器布局映射为 OpenCV object points。
   using BoardMap = std::map<int, MarkerCorners>;
 
+  /**
+   * @brief 已接受并参与后续标定求解的单视角样本。
+   *
+   * View 只保存求解需要的点集和质量指标，不保存整帧图像；debug 图会立即写到磁盘。
+   */
   struct View
   {
+    /// CameraBase 当前标定轮次内的原始帧序号。
     uint64_t frame_index = 0;
+    /// 该视角对应的相机时间戳，单位 us。
     uint64_t timestamp_us = 0;
+    /// 该视角中实际参与 object/image points 构建的 marker 数。
     int used_markers = 0;
+    /// 用平面单应性估计出的像素 RMS，用于早期几何一致性筛选。
     double homography_rms = 0.0;
+    /// marker 区域拉普拉斯方差，数值越大通常越清晰。
     double sharpness_score = 0.0;
+    /// 标定板外接框中心的归一化 x 坐标，范围大致为 0 到 1。
     double center_x_norm = 0.0;
+    /// 标定板外接框中心的归一化 y 坐标，范围大致为 0 到 1。
     double center_y_norm = 0.0;
+    /// 标定板外接框面积相对整幅图面积的平方根，用于近似距离变化。
     double scale_norm = 0.0;
+    /// 标定板在图像平面内的归一化角度，范围为 [0, 180) 度。
     double angle_deg = 0.0;
+    /// OpenCV calibrateCamera 的三维标定板点，单位 mm。
     std::vector<cv::Point3f> object_points;
+    /// 与 object_points 一一对应的二维图像角点，单位 pixel。
     std::vector<cv::Point2f> image_points;
   };
 
+  /**
+   * @brief 从锁内复制到 OpenCV 检测阶段的只读帧快照。
+   *
+   * 检测和标定开销较大，不能长期持有 mutex_；因此 PrepareFrame() 只在锁内复制这些数据。
+   */
   struct FrameSnapshot
   {
+    /// 本轮标定参数快照。
     Config config;
+    /// 本轮标定板三维角点查表快照。
     BoardMap board;
+    /// OpenCV ArUco 字典；cv::Ptr 按引用计数安全复制。
     cv::Ptr<cv::aruco::Dictionary> dictionary;
+    /// OpenCV 检测参数；cv::Ptr 按引用计数安全复制。
     cv::Ptr<cv::aruco::DetectorParameters> detector_params;
+    /// 当前原始帧序号。
     uint64_t frame_index = 0;
+    /// 当前帧时间戳，单位 us。
     uint64_t timestamp_us = 0;
   };
 
+  /**
+   * @brief 单帧检测产生的中间结果。
+   *
+   * Detection 包含 OpenCV 原始 marker 结果、转换后的点集，以及用于决定是否入库的质量指标。
+   */
   struct Detection
   {
+    /// 当前帧中属于本标定板且角点完整的 marker 数。
     int used_markers = 0;
+    /// 单应性 RMS，越大说明点集越不符合单平面标定板模型。
     double homography_rms = 0.0;
+    /// marker 区域清晰度分数。
     double sharpness_score = 0.0;
+    /// 标定板外接框中心归一化 x 坐标。
     double center_x_norm = 0.0;
+    /// 标定板外接框中心归一化 y 坐标。
     double center_y_norm = 0.0;
+    /// 标定板外接框归一化尺度。
     double scale_norm = 0.0;
+    /// 标定板图像平面内角度。
     double angle_deg = 0.0;
+    /// 已按 marker id 映射后的三维点。
     std::vector<cv::Point3f> object_points;
+    /// 已按 marker id 映射后的二维点。
     std::vector<cv::Point2f> image_points;
+    /// OpenCV detectMarkers 返回的 marker 四角点，保留用于 debug 绘制和清晰度 mask。
     std::vector<std::vector<cv::Point2f>> marker_corners;
+    /// OpenCV detectMarkers 返回的 marker id 列矩阵。
     cv::Mat marker_ids;
   };
 
+  /**
+   * @brief StoreDetection() 接受样本后传给 SaveDebugImage() 的轻量元数据。
+   *
+   * 该结构避免 SaveDebugImage() 重新加锁读取 accepted_views_。
+   */
   struct StoredView
   {
+    /// debug 图输出目录。
     std::string debug_dir;
+    /// 已接受视角编号，从 1 开始用于文件名和图像标注。
     std::size_t view_number = 0;
+    /// 原始帧序号。
     uint64_t frame_index = 0;
+    /// 接受时的 marker 数。
     int used_markers = 0;
+    /// 接受时的单应性 RMS。
     double homography_rms = 0.0;
+    /// 接受时的清晰度分数。
     double sharpness_score = 0.0;
   };
 
+  /// 保存阶段回填给运行状态的最终输出摘要。
   struct CalibrationOutput
   {
+    /// OpenCV calibrateCamera 返回的全局重投影 RMS。
     double rms = -1.0;
+    /// 写出的 calibration.yml 路径。
     std::string yaml_path;
   };
 
+  /// PrepareFrame() 对当前帧给出的发布路径决策。
   enum class FrameAction
   {
+    /// 标定未激活，交还给 CameraBase 正常发布。
     kPublish,
+    /// 标定激活但本帧不做检测，吞掉帧以切断下游图像发布。
     kSwallow,
+    /// 标定激活且当前帧需要进入 OpenCV 检测。
     kProcess,
   };
 
+  /**
+   * @brief 根据命令参数生成完整配置。
+   *
+   * marker_count 为 GShang 布局中实际存在的 ArUco marker 数；min_markers
+   * 取约三分之二，兼顾遮挡容忍和误检防护。
+   */
   static Config MakeConfig(double marker_mm, int cols, int rows)
   {
     Config config{};
@@ -322,6 +456,11 @@ class CameraBaseCalibration
     return config;
   }
 
+  /**
+   * @brief 重置本轮标定的计数器和一次性日志标记。
+   *
+   * 调用方必须已持有 mutex_，因为这些字段和采样状态一起更新。
+   */
   void ResetCountersLocked()
   {
     raw_frame_index_ = 0;
@@ -340,6 +479,12 @@ class CameraBaseCalibration
     duplicate_rejected_frames_ = 0;
   }
 
+  /**
+   * @brief 在锁内完成帧闸门决策，并为需要检测的帧生成快照。
+   *
+   * 这里是 CameraBase 发布路径和标定路径的分界点：只要 active_ 为 true，帧就被吞掉；
+   * 只有抽帧命中的帧才继续跑 OpenCV 检测。
+   */
   FrameAction PrepareFrame(const uint8_t* data, uint64_t timestamp_us,
                            FrameSnapshot& snapshot)
   {
@@ -351,6 +496,7 @@ class CameraBaseCalibration
 
     ++swallowed_frames_;
     ++raw_frame_index_;
+    // data 为空或未命中抽帧间隔时仍然截断发布，但不消耗 OpenCV 检测算力。
     if (data == nullptr || config_.process_stride <= 0 ||
         (raw_frame_index_ % static_cast<uint64_t>(config_.process_stride)) != 0)
     {
@@ -358,6 +504,7 @@ class CameraBaseCalibration
     }
 
     ++processed_frames_;
+    // 复制完整检测上下文，后续 DetectUsableView() 可以无锁运行。
     snapshot.config = config_;
     snapshot.board = board_;
     snapshot.dictionary = dictionary_;
@@ -367,6 +514,11 @@ class CameraBaseCalibration
     return FrameAction::kProcess;
   }
 
+  /**
+   * @brief 对单帧运行 ArUco 检测，并判断是否达到基础可用条件。
+   *
+   * @return true 表示 marker 数、GShang id 映射、平面单应性和质量指标都已准备好。
+   */
   bool DetectUsableView(const cv::Mat& image, const FrameSnapshot& snapshot,
                         Detection& detection)
   {
@@ -383,6 +535,7 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 只收集属于当前 GShang 标定板布局的 marker，画面里的其它 marker 直接忽略。
     if (!CollectPoints(detection.marker_corners, detection.marker_ids,
                        snapshot.board, detection.object_points,
                        detection.image_points, detection.used_markers))
@@ -395,6 +548,7 @@ class CameraBaseCalibration
       ++detected_frames_;
     }
 
+    // 单应性 RMS 是快速几何门槛，能在 calibrateCamera 前拒绝明显错配的角点集。
     detection.homography_rms =
         HomographyRms(detection.object_points, detection.image_points);
     if (detection.used_markers < snapshot.config.min_markers ||
@@ -403,10 +557,16 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 质量指标只对已经通过基础几何门槛的帧计算，减少无效帧的额外开销。
     FillDetectionQuality(image, detection);
     return true;
   }
 
+  /**
+   * @brief 把通过检测的帧按时间、容量、清晰度和重复姿态规则写入采样池。
+   *
+   * @return true 表示该视角已被接受，调用方应同步保存 debug 图。
+   */
   bool StoreDetection(const FrameSnapshot& snapshot, const Detection& detection,
                       StoredView& stored)
   {
@@ -416,6 +576,7 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 时间间隔门槛防止相机/手机静止时连续帧高度相关。
     if (last_accept_timestamp_us_ != 0 &&
         snapshot.timestamp_us > last_accept_timestamp_us_ &&
         snapshot.timestamp_us - last_accept_timestamp_us_ <
@@ -424,6 +585,7 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 达到上限后保持吞帧但不再增长采样池，等待操作手 save/stop。
     if (static_cast<int>(accepted_views_.size()) >= config_.max_stored_views)
     {
       if (!max_views_logged_)
@@ -435,6 +597,7 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 使用“绝对清晰度”和“相对本轮最佳清晰度”两条线处理不同曝光/距离的视频。
     best_sharpness_score_ = std::max(best_sharpness_score_, detection.sharpness_score);
     const double sharpness_threshold =
         std::max(config_.min_sharpness_score,
@@ -445,12 +608,14 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 近重复门槛鼓励覆盖不同中心、距离和旋转，提升内参可观测性。
     if (IsNearDuplicateLocked(detection))
     {
       ++duplicate_rejected_frames_;
       return false;
     }
 
+    // 入库的 View 与 Detection 分离，保留标定所需点集和质量指标即可。
     View view;
     view.frame_index = snapshot.frame_index;
     view.timestamp_us = snapshot.timestamp_us;
@@ -489,6 +654,9 @@ class CameraBaseCalibration
     return true;
   }
 
+  /**
+   * @brief 对不支持的像素编码只打一条错误日志，避免每帧刷屏。
+   */
   void LogUnsupportedEncodingOnce()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -501,18 +669,29 @@ class CameraBaseCalibration
                  static_cast<unsigned>(CameraInfoV.encoding));
   }
 
+  /**
+   * @brief 根据 GShang 几何比例计算完整棋盘方格边长。
+   *
+   * @return 方格边长，单位 mm。
+   */
   static double SquareMm(const Config& config)
   {
     return config.marker_mm * static_cast<double>(kGShangSquareCells) /
            static_cast<double>(kGShangMarkerCells);
   }
 
+  /**
+   * @brief 解析 `25mm` / `25` 形式的 marker 边长。
+   *
+   * @return true 表示解析出正的有限数值，单位 mm。
+   */
   static bool ParseMarkerMm(std::string_view text, double& marker_mm)
   {
     std::string value(text);
     if (value.size() >= 2)
     {
       const std::string suffix = value.substr(value.size() - 2);
+      // 命令行允许带 mm 后缀，内部统一存为裸数值。
       if (suffix == "mm" || suffix == "MM")
       {
         value.resize(value.size() - 2);
@@ -531,6 +710,11 @@ class CameraBaseCalibration
     return true;
   }
 
+  /**
+   * @brief 把相机名转成安全的目录名片段。
+   *
+   * 非字母数字、下划线和连字符都会替换为下划线，避免路径中出现空格或特殊字符。
+   */
   static std::string Sanitize(std::string_view text)
   {
     std::string out;
@@ -550,6 +734,9 @@ class CameraBaseCalibration
     return out.empty() ? "camera" : out;
   }
 
+  /**
+   * @brief 生成用于输出目录的本地时间戳。
+   */
   static std::string TimeStampString()
   {
     std::time_t now = std::time(nullptr);
@@ -561,6 +748,11 @@ class CameraBaseCalibration
     return std::string(buf);
   }
 
+  /**
+   * @brief 生成本轮标定输出目录。
+   *
+   * 路径格式为 `runs/camera_calib/<timestamp>_<camera>_<marker>mm_<cols>x<rows>`。
+   */
   static std::string BuildOutputDir(std::string_view camera_name,
                                     const Config& config)
   {
@@ -590,6 +782,7 @@ class CameraBaseCalibration
     {
       for (int col = 0; col < config.cols; ++col)
       {
+        // GShang ChArUco 只在黑白棋盘的奇偶格中放 marker，id 按扫描顺序递增。
         if (((row + col) % 2) == 0)
         {
           continue;
@@ -608,6 +801,13 @@ class CameraBaseCalibration
     return map;
   }
 
+  /**
+   * @brief 把 OpenCV 检测到的 marker id/角点转换为标定用 object/image points。
+   *
+   * 只使用在 BoardMap 中能找到的 id；这样即使画面中出现无关 ArUco，也不会污染标定。
+   *
+   * @return true 表示至少收集到一个属于当前标定板的 marker。
+   */
   static bool CollectPoints(const std::vector<std::vector<cv::Point2f>>& corners,
                             const cv::Mat& ids, const BoardMap& board,
                             std::vector<cv::Point3f>& object_points,
@@ -631,6 +831,7 @@ class CameraBaseCalibration
 
       const int id = ids.at<int>(i, 0);
       const auto marker = board.find(id);
+      // 忽略字典中存在但不属于当前 GShang 尺寸/布局的 marker。
       if (marker == board.end())
       {
         continue;
@@ -646,6 +847,11 @@ class CameraBaseCalibration
     return used_markers > 0;
   }
 
+  /**
+   * @brief 将输入图像转换为灰度视图/图像，供清晰度评估使用。
+   *
+   * 单通道输入直接返回原 Mat；三/四通道输入生成新的灰度 Mat。
+   */
   static cv::Mat MakeGrayImage(const cv::Mat& image)
   {
     if (image.channels() == 1)
@@ -665,6 +871,11 @@ class CameraBaseCalibration
     return gray;
   }
 
+  /**
+   * @brief 计算 marker 区域内的拉普拉斯方差作为清晰度指标。
+   *
+   * 只在 marker 多边形及轻微膨胀区域统计，避免背景纹理或屏幕边框影响运动模糊判断。
+   */
   static double MarkerSharpnessScore(
       const cv::Mat& image, const std::vector<std::vector<cv::Point2f>>& corners)
   {
@@ -685,6 +896,7 @@ class CameraBaseCalibration
       std::array<cv::Point, 4> polygon{};
       for (int i = 0; i < 4; ++i)
       {
+        // fillConvexPoly 需要整数像素点，使用四舍五入保留角点所在区域。
         polygon[static_cast<std::size_t>(i)] =
             cv::Point{static_cast<int>(std::lround(marker[static_cast<std::size_t>(i)].x)),
                       static_cast<int>(std::lround(marker[static_cast<std::size_t>(i)].y))};
@@ -698,6 +910,7 @@ class CameraBaseCalibration
       return 0.0;
     }
 
+    // 膨胀一圈把 marker 边缘纳入统计，边缘越锐利，拉普拉斯方差越高。
     cv::dilate(marker_mask, marker_mask, cv::Mat{}, {-1, -1}, 1);
     cv::Mat laplacian;
     cv::Laplacian(gray, laplacian, CV_64F, 3);
@@ -708,6 +921,11 @@ class CameraBaseCalibration
     return stddev[0] * stddev[0];
   }
 
+  /**
+   * @brief 把 OpenCV minAreaRect 角度规整到 [0, 180)。
+   *
+   * 标定板正反 180 度在近重复判断中等价，因此只保留半圆范围。
+   */
   static double NormalizeBoardAngle(double angle_deg, const cv::Size2f& size)
   {
     if (size.width < size.height)
@@ -726,6 +944,9 @@ class CameraBaseCalibration
     return angle_deg;
   }
 
+  /**
+   * @brief 计算两个平面角度在 180 度周期下的最小差值。
+   */
   static double AngleDeltaDeg(double lhs, double rhs)
   {
     double delta = std::fabs(lhs - rhs);
@@ -736,6 +957,11 @@ class CameraBaseCalibration
     return delta > 90.0 ? 180.0 - delta : delta;
   }
 
+  /**
+   * @brief 填充检测帧的清晰度、图像中心、尺度和旋转角质量指标。
+   *
+   * 这些指标不直接参与 OpenCV 标定，但用于在线采样去模糊、去重复，以及 views.csv 复盘。
+   */
   static void FillDetectionQuality(const cv::Mat& image, Detection& detection)
   {
     detection.sharpness_score =
@@ -762,15 +988,22 @@ class CameraBaseCalibration
 
     if (detection.image_points.size() >= 4)
     {
+      // 用全部角点的最小外接旋转矩形估计板面在图像内的旋转角。
       const cv::RotatedRect rect = cv::minAreaRect(detection.image_points);
       detection.angle_deg = NormalizeBoardAngle(rect.angle, rect.size);
     }
   }
 
+  /**
+   * @brief 判断当前检测是否和已有样本过近。
+   *
+   * 调用方必须持有 mutex_，因为本函数遍历 accepted_views_ 并读取 config_ 阈值。
+   */
   bool IsNearDuplicateLocked(const Detection& detection) const
   {
     for (const View& view : accepted_views_)
     {
+      // 中心、尺度和角度都很接近时才视为重复；任一维度变化足够大则保留。
       const double center_delta =
           std::hypot(detection.center_x_norm - view.center_x_norm,
                      detection.center_y_norm - view.center_y_norm);
@@ -789,6 +1022,11 @@ class CameraBaseCalibration
     return false;
   }
 
+  /**
+   * @brief 使用平面单应性估计当前角点集的像素 RMS。
+   *
+   * 这是保存前标定的轻量前置检查：标定板是平面，正确角点应能被单应性较好解释。
+   */
   static double HomographyRms(const std::vector<cv::Point3f>& object_points,
                               const std::vector<cv::Point2f>& image_points)
   {
@@ -801,6 +1039,7 @@ class CameraBaseCalibration
     object_xy.reserve(object_points.size());
     for (const auto& point : object_points)
     {
+      // 标定板 z 恒为 0，单应性只需要平面坐标 x/y。
       object_xy.emplace_back(point.x, point.y);
     }
 
@@ -822,6 +1061,11 @@ class CameraBaseCalibration
     return std::sqrt(sum2 / static_cast<double>(image_points.size()));
   }
 
+  /**
+   * @brief 根据 CameraInfoV 把外部图像缓冲区封装为 OpenCV Mat。
+   *
+   * 本函数不复制像素，返回的 cv::Mat 只在当前 ProcessFrame() 调用期间有效。
+   */
   cv::Mat MakeImageView(const uint8_t* data) const
   {
     constexpr int width = static_cast<int>(CameraInfoV.width);
@@ -848,6 +1092,11 @@ class CameraBaseCalibration
     }
   }
 
+  /**
+   * @brief 调用 OpenCV calibrateCamera 计算内参、畸变和每视角外参。
+   *
+   * @return true 保留为调用语义占位；OpenCV 异常由上层捕获。
+   */
   static bool CalibrateViews(const std::vector<View>& views,
                              cv::Mat& camera_matrix, cv::Mat& distortion,
                              double& rms, std::vector<cv::Mat>& rvecs,
@@ -859,6 +1108,7 @@ class CameraBaseCalibration
     image_points.reserve(views.size());
     for (const View& view : views)
     {
+      // calibrateCamera 需要按视角分组的点集，而 View 已经保存了一一对应关系。
       object_points.push_back(view.object_points);
       image_points.push_back(view.image_points);
     }
@@ -871,6 +1121,9 @@ class CameraBaseCalibration
     return true;
   }
 
+  /**
+   * @brief 计算单个视角在给定内参/畸变/外参下的重投影 RMS。
+   */
   static double ReprojectionRms(const View& view, const cv::Mat& camera_matrix,
                                 const cv::Mat& distortion,
                                 const cv::Mat& rvec, const cv::Mat& tvec)
@@ -888,6 +1141,11 @@ class CameraBaseCalibration
     return std::sqrt(sum2 / static_cast<double>(view.image_points.size()));
   }
 
+  /**
+   * @brief 批量计算所有视角的重投影 RMS。
+   *
+   * rvecs/tvecs 必须与 views 一一对应，来源于同一次 CalibrateViews()。
+   */
   static std::vector<double> PerViewRms(const std::vector<View>& views,
                                         const cv::Mat& camera_matrix,
                                         const cv::Mat& distortion,
@@ -904,6 +1162,9 @@ class CameraBaseCalibration
     return rms;
   }
 
+  /**
+   * @brief 根据单视角重投影 RMS 剔除离群样本。
+   */
   static std::vector<View> FilterByRms(const std::vector<View>& views,
                                        const std::vector<double>& per_view_rms,
                                        double max_rms)
@@ -919,6 +1180,12 @@ class CameraBaseCalibration
     return filtered;
   }
 
+  /**
+   * @brief 保存求解前再次按清晰度过滤样本。
+   *
+   * 在线阶段会动态更新最佳清晰度；保存阶段重新计算阈值，保证最终求解用的是整轮样本中
+   * 相对清晰的一组视角。
+   */
   static std::vector<View> FilterBySharpness(const std::vector<View>& views,
                                              const Config& config)
   {
@@ -944,11 +1211,17 @@ class CameraBaseCalibration
     return filtered;
   }
 
+  /**
+   * @brief 完成保存命令的数值求解、离群过滤和文件写出。
+   *
+   * 流程为：清晰度预过滤 -> 初次标定 -> 高 RMS 视角过滤 -> 可选二次标定 -> 写 YAML/CSV/snippet。
+   */
   static bool CalibrateAndWrite(const std::vector<View>& input_views,
                                 const Config& config,
                                 const std::string& output_dir,
                                 CalibrationOutput& output)
   {
+    // 先用清晰度过滤处理运动模糊；若过滤后视角不足，则回退到原始输入避免误删过多。
     std::vector<View> calibration_views = FilterBySharpness(input_views, config);
     if (calibration_views.size() >= kMinimumCalibrationViews &&
         calibration_views.size() < input_views.size())
@@ -978,6 +1251,7 @@ class CameraBaseCalibration
       return false;
     }
 
+    // 初次求解后根据每视角 RMS 去掉离群样本，再做一次最终求解。
     std::vector<View> final_views = calibration_views;
     std::vector<double> final_per_view_rms =
         PerViewRms(calibration_views, camera_matrix, distortion, rvecs, tvecs);
@@ -1004,6 +1278,7 @@ class CameraBaseCalibration
 
       if (!filtered_camera_matrix.empty())
       {
+        // 二次求解成功才替换最终输出；失败时保留初次求解结果。
         camera_matrix = filtered_camera_matrix;
         distortion = filtered_distortion;
         rms = filtered_rms;
@@ -1029,6 +1304,7 @@ class CameraBaseCalibration
     const std::filesystem::path snippet_path =
         std::filesystem::path(output_dir) / "camera_info_snippet.txt";
 
+    // 三个输出分别服务于 OpenCV 复用、视角质量复盘、CameraInfo 常量粘贴。
     WriteCalibrationYaml(yaml_path, config, camera_matrix, distortion, rms,
                          static_cast<int>(final_views.size()));
     WriteViewsCsv(csv_path, final_views, final_per_view_rms);
@@ -1042,6 +1318,9 @@ class CameraBaseCalibration
     return true;
   }
 
+  /**
+   * @brief 写出 OpenCV FileStorage 格式的完整标定结果。
+   */
   static void WriteCalibrationYaml(const std::filesystem::path& path,
                                    const Config& config,
                                    const cv::Mat& camera_matrix,
@@ -1063,6 +1342,11 @@ class CameraBaseCalibration
     fs << "distortion_coefficients" << distortion;
   }
 
+  /**
+   * @brief 写出每个最终视角的质量指标和重投影 RMS。
+   *
+   * CSV 用于离线检查自动采样是否覆盖了足够姿态，以及哪些视角被最终保留。
+   */
   static void WriteViewsCsv(const std::filesystem::path& path,
                             const std::vector<View>& views,
                             const std::vector<double>& per_view_rms)
@@ -1086,12 +1370,18 @@ class CameraBaseCalibration
     }
   }
 
+  /**
+   * @brief 写出可粘贴到 CameraInfo 配置中的内参片段。
+   *
+   * distortion_values 固定展开到 14 项，兼容当前 CameraTypes 畸变数组容量。
+   */
   static void WriteCameraInfoSnippet(const std::filesystem::path& path,
                                      const cv::Mat& camera_matrix,
                                      const cv::Mat& distortion)
   {
     std::array<double, 14> distortion_values{};
     const cv::Mat flat = distortion.reshape(1, 1);
+    // OpenCV 输出畸变项数量随模型变化，这里只拷贝 CameraInfo 能承载的前 14 项。
     for (int i = 0; i < std::min(flat.cols, static_cast<int>(distortion_values.size())); ++i)
     {
       distortion_values[static_cast<std::size_t>(i)] = flat.at<double>(0, i);
@@ -1102,6 +1392,7 @@ class CameraBaseCalibration
     out << "camera_matrix: [";
     for (int i = 0; i < 9; ++i)
     {
+      // CameraInfo 使用行优先的一维数组保存 3x3 内参矩阵。
       if (i != 0)
       {
         out << ", ";
@@ -1114,6 +1405,7 @@ class CameraBaseCalibration
     out << "distortion_coefficients: [";
     for (std::size_t i = 0; i < distortion_values.size(); ++i)
     {
+      // 保持固定长度输出，便于直接替换现有 CameraInfo 常量。
       if (i != 0)
       {
         out << ", ";
@@ -1130,12 +1422,18 @@ class CameraBaseCalibration
         << ", 0.0, 0.0, 0.0, 1.0, 0.0]\n";
   }
 
+  /**
+   * @brief 保存已接受视角的 debug 图。
+   *
+   * 图中绘制检测到的 marker 和该视角质量指标；写图失败只报警，不影响标定结果。
+   */
   static void SaveDebugImage(const cv::Mat& image, const Detection& detection,
                              const StoredView& stored)
   {
     cv::Mat debug = image.clone();
     if (!detection.marker_ids.empty())
     {
+      // 保留 OpenCV 原始角点绘制，方便人工复盘 id 和角点方向是否正确。
       cv::aruco::drawDetectedMarkers(debug, detection.marker_corners,
                                      detection.marker_ids);
     }
@@ -1149,6 +1447,7 @@ class CameraBaseCalibration
     cv::putText(debug, label.str(), {20, 45}, cv::FONT_HERSHEY_SIMPLEX,
                 1.0, {0, 255, 0}, 2, cv::LINE_AA);
 
+    // 文件名同时包含视角序号和原始帧号，方便和 views.csv 对齐。
     std::ostringstream name;
     name << "view_" << std::setw(4) << std::setfill('0') << stored.view_number
          << "_frame_" << stored.frame_index << ".jpg";
@@ -1166,32 +1465,56 @@ class CameraBaseCalibration
     }
   }
 
+  /// 保护配置、采样池、输出路径和统计计数；OpenCV 重活不在锁内执行。
   mutable std::mutex mutex_;
+  /// CommitImage() 热路径的快速活动标记，用于未激活时无锁直接放行。
   std::atomic<bool> active_fast_{false};
 
+  /// 锁内权威活动状态；true 时 CameraBase 图像发布被标定流程截断。
   bool active_{false};
+  /// 最近一次 SaveAndStop() 是否成功写出了标定文件。
   bool finished_{false};
+  /// 不支持像素编码错误是否已经记录过。
   bool unsupported_encoding_logged_{false};
+  /// 达到建议视角数的提示是否已经记录过。
   bool recommended_views_logged_{false};
+  /// 达到最大存储视角数的提示是否已经记录过。
   bool max_views_logged_{false};
 
+  /// 当前标定轮次配置。
   Config config_{};
+  /// 当前 GShang 标定板 marker id 到三维角点的映射。
   BoardMap board_{};
+  /// 当前 ArUco 字典实例。
   cv::Ptr<cv::aruco::Dictionary> dictionary_{};
+  /// 当前 ArUco 检测参数实例。
   cv::Ptr<cv::aruco::DetectorParameters> detector_params_{};
+  /// 已通过在线过滤并等待保存求解的视角集合。
   std::vector<View> accepted_views_{};
 
+  /// 本轮标定输出根目录。
   std::string output_dir_{};
+  /// 已接受视角 debug 图目录。
   std::string debug_dir_{};
+  /// 最近一次成功保存的 calibration.yml 路径。
   std::string last_saved_yaml_{};
 
+  /// 最近一次成功标定的全局 RMS；负数表示尚无结果。
   double last_rms_{-1.0};
+  /// 本轮采样中已见到的最佳清晰度分数。
   double best_sharpness_score_{0.0};
+  /// 标定激活期间被送入 ProcessFrame() 的原始帧计数。
   uint64_t raw_frame_index_{0};
+  /// 标定激活期间被吞掉、未发布给 CameraFrameSync 的帧计数。
   uint64_t swallowed_frames_{0};
+  /// 实际进入 OpenCV 检测的帧计数。
   uint64_t processed_frames_{0};
+  /// detectMarkers 找到至少一个本板 marker 的帧计数。
   uint64_t detected_frames_{0};
+  /// 因清晰度低被拒绝的候选视角计数。
   uint64_t sharpness_rejected_frames_{0};
+  /// 因中心/尺度/角度过近被拒绝的重复视角计数。
   uint64_t duplicate_rejected_frames_{0};
+  /// 最近一次接受视角的时间戳，单位 us。
   uint64_t last_accept_timestamp_us_{0};
 };
