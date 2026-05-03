@@ -52,6 +52,51 @@
 - 相机触发同步命令不属于 `CameraBase`。实机链路应使用 `CameraSync::SyncCommand`
   作为跨端 payload，并通过专门的同步 topic 下发。
 
+## 在线标定命令
+
+`CameraBase` 内置一个面向实机调试的 GShang ChArUco 在线标定入口。启动后，
+`CommitImage()` 会先把图像交给标定器；标定器接管的帧不会继续发布到
+`CameraFrameSync`，避免下游算法在标定期间继续消费旧相机参数下的图像。
+
+命令在相机自己的 RamFS 文件下执行：
+
+```text
+cali <标记尺寸mm> <列数> <行数>
+cali status
+cali save
+cali stop
+```
+
+示例：
+
+```text
+cali 25mm 8 6
+```
+
+对应 GShang 在线工具里的 `ChArUcoBoard`，`charucoDictionary=aruco`，
+`markerSize=25`，列数 `8`，行数 `6`。当前实现按 GShang 的实际几何处理：
+ArUco-original 标记只放在 `(row + col) % 2 == 1` 的棋盘格中，完整方格宽度由
+`square_mm = marker_mm * 9 / 7` 推导，不需要额外输入 `gridWidth`。
+
+采样策略：
+
+- 只接受能检测到足够标记、且单应性重投影误差合理的视角。
+- 不再 50 帧自动结束；建议采满约 `120` 个有效视角，最多缓存 `300` 个视角。
+- `cali status` 查看已处理帧、已检测帧、有效视角数和输出目录。
+- `cali save` 会结束本轮标定并写出结果；至少需要 `8` 个有效视角。
+- `cali stop` 只停止并恢复图像发布，不写出新的标定结果。
+
+输出目录格式为 `runs/camera_calib/<时间>_<相机名>_<标记尺寸>mm_<列数>x<行数>/`，
+主要文件包括：
+
+- `calibration.yml`：OpenCV 相机矩阵、畸变参数、RMS 和标定板几何。
+- `views.csv`：每个保留视角的帧号、时间戳、标记数和误差。
+- `camera_info_snippet.txt`：可拷回静态 `CameraInfo` 的矩阵片段。
+- `debug/*.jpg`：每个接受视角的检测可视化图。
+
+采集时尽量覆盖画面中心、四角、近距离、远距离和不同倾角；避免屏幕反光、运动模糊和
+整块标定板长期停在同一姿态。
+
 ## 备注
 
 - 图像字节数在编译期由 `CameraInfo.step * CameraInfo.height` 推导。

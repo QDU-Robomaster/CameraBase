@@ -1,9 +1,9 @@
-# CMakeLists.txt for CameraBase
+# CameraBase 模块 CMake 配置
 
-# Add module to include path
+# 导出本模块头文件。
 target_include_directories(xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
-# Auto-include source files
+# 自动纳入本模块源文件。
 file(GLOB MODULE_CAMERABASE_SRC CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_LIST_DIR}/*.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/*.cxx"
@@ -13,7 +13,7 @@ file(GLOB MODULE_CAMERABASE_SRC CONFIGURE_DEPENDS
 
 target_sources(xr PRIVATE ${MODULE_CAMERABASE_SRC})
 
-# INTERFACE deps shell
+# 模块依赖壳。CameraBase 在线标定使用 OpenCV ArUco / calib3d。
 get_filename_component(_MODULE_DIRNAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 set(_DEPS_TARGET "${_MODULE_DIRNAME}_deps")
 add_library(${_DEPS_TARGET} INTERFACE)
@@ -29,5 +29,5 @@ target_link_libraries(${_DEPS_TARGET} INTERFACE ${OpenCV_LIBS})
 #   # -Wall
 # )
 
-# Register to global
+# 注册到全局模块依赖集合。
 set_property(GLOBAL APPEND PROPERTY XR_MODULE_DEPS ${_DEPS_TARGET})

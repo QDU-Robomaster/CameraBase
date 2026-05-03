@@ -41,6 +41,12 @@ class CameraBaseCalibration
   static constexpr int kMinimumCalibrationViews = 8;
   static constexpr int kDefaultRecommendedViews = 120;
   static constexpr int kDefaultMaxStoredViews = 300;
+  static constexpr bool kSupportsImageEncoding =
+      CameraInfoV.encoding == CameraTypes::Encoding::BGR8 ||
+      CameraInfoV.encoding == CameraTypes::Encoding::RGB8 ||
+      CameraInfoV.encoding == CameraTypes::Encoding::BGRA8 ||
+      CameraInfoV.encoding == CameraTypes::Encoding::RGBA8 ||
+      CameraInfoV.encoding == CameraTypes::Encoding::MONO8;
 
   struct Config
   {
@@ -72,6 +78,13 @@ class CameraBaseCalibration
     {
       XR_LOG_ERROR("相机标定：标定板行列无效 cols=%d rows=%d",
                    cols, rows);
+      return false;
+    }
+
+    if constexpr (!kSupportsImageEncoding)
+    {
+      XR_LOG_ERROR("相机标定：当前图像编码暂不支持 encoding=%u",
+                   static_cast<unsigned>(CameraInfoV.encoding));
       return false;
     }
 

@@ -20,6 +20,7 @@ depends: []
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -308,16 +309,35 @@ class CameraBase
     return true;
   }
 
-  // 调试/bring-up 阶段的临时命令入口。
+  static bool ParsePositiveIntArg(const char* text, int& value)
+  {
+    if (text == nullptr || *text == '\0')
+    {
+      return false;
+    }
+
+    char* end = nullptr;
+    const long parsed = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || parsed <= 0 ||
+        parsed > static_cast<long>(std::numeric_limits<int>::max()))
+    {
+      return false;
+    }
+
+    value = static_cast<int>(parsed);
+    return true;
+  }
+
+  // 调试/bring-up 阶段的命令入口。
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
     {
       LibXR::STDIO::Printf<"Camera: %s\n\n">(self->name_.c_str());
-      LibXR::STDIO::Printf<"Usage:\r\n">();
-      LibXR::STDIO::Printf<"  set_exposure <exposure>\r\n">();
-      LibXR::STDIO::Printf<"  set_gain <gain>\r\n">();
-      LibXR::STDIO::Printf<"  cali <marker_mm> <cols> <rows>\r\n">();
+      LibXR::STDIO::Printf<"用法:\r\n">();
+      LibXR::STDIO::Printf<"  set_exposure <曝光>\r\n">();
+      LibXR::STDIO::Printf<"  set_gain <增益>\r\n">();
+      LibXR::STDIO::Printf<"  cali <标记尺寸mm> <列数> <行数>  例：cali 25mm 8 6\r\n">();
       LibXR::STDIO::Printf<"  cali status\r\n">();
       LibXR::STDIO::Printf<"  cali save\r\n">();
       LibXR::STDIO::Printf<"  cali stop\r\n">();
@@ -327,8 +347,15 @@ class CameraBase
     {
       if (argc == 5)
       {
-        const int cols = atoi(argv[3]);
-        const int rows = atoi(argv[4]);
+        int cols = 0;
+        int rows = 0;
+        if (!ParsePositiveIntArg(argv[3], cols) ||
+            !ParsePositiveIntArg(argv[4], rows))
+        {
+          LibXR::STDIO::Printf<"标定板列数和行数必须是正整数：cols=%s rows=%s\r\n">(
+              argv[3], argv[4]);
+          return -1;
+        }
         return self->calibration_.Start(argv[2], cols, rows, self->name_) ? 0 : -1;
       }
 
@@ -364,7 +391,7 @@ class CameraBase
       }
     }
 
-    LibXR::STDIO::Printf<"Unknown command: %s\n">(argv[1]);
+    LibXR::STDIO::Printf<"未知命令：%s\n">(argv[1]);
     return -1;
   }
 
