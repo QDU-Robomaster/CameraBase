@@ -160,6 +160,8 @@ class CameraTypes
   }
 };
 
+#include "CameraBaseCalibration.hpp"
+
 /**
  * @class CameraBase
  * @brief 编译期绑定相机静态信息的基类。
@@ -287,6 +289,12 @@ class CameraBase
       return false;
     }
 
+    if (calibration_.ProcessFrame(writable_image_->data.data(),
+                                  static_cast<uint64_t>(writable_image_->timestamp_us)))
+    {
+      return true;
+    }
+
     ImageFrame* next_image = nullptr;
     image_commit_callback_.Run(false, next_image);
     if (next_image == nullptr)
@@ -309,7 +317,38 @@ class CameraBase
       LibXR::STDIO::Printf<"Usage:\r\n">();
       LibXR::STDIO::Printf<"  set_exposure <exposure>\r\n">();
       LibXR::STDIO::Printf<"  set_gain <gain>\r\n">();
+      LibXR::STDIO::Printf<"  cali <marker_mm> <cols> <rows>\r\n">();
+      LibXR::STDIO::Printf<"  cali status\r\n">();
+      LibXR::STDIO::Printf<"  cali save\r\n">();
+      LibXR::STDIO::Printf<"  cali stop\r\n">();
       return 0;
+    }
+    else if (strcmp(argv[1], "cali") == 0)
+    {
+      if (argc == 5)
+      {
+        const int cols = atoi(argv[3]);
+        const int rows = atoi(argv[4]);
+        return self->calibration_.Start(argv[2], cols, rows, self->name_) ? 0 : -1;
+      }
+
+      if (argc == 2 || (argc == 3 && strcmp(argv[2], "status") == 0))
+      {
+        const std::string status = self->calibration_.StatusString();
+        LibXR::STDIO::Printf<"%s\r\n">(status.c_str());
+        return 0;
+      }
+
+      if (argc == 3 && strcmp(argv[2], "save") == 0)
+      {
+        return self->calibration_.SaveAndStop() ? 0 : -1;
+      }
+
+      if (argc == 3 && strcmp(argv[2], "stop") == 0)
+      {
+        self->calibration_.Stop();
+        return 0;
+      }
     }
     else if (argc == 3)
     {
@@ -337,4 +376,5 @@ class CameraBase
   LibXR::Topic imu_topic_;
   ImageFrame* writable_image_{nullptr};
   ImageCommitCallback image_commit_callback_{};
+  CameraBaseCalibration<CameraInfoV> calibration_{};
 };
