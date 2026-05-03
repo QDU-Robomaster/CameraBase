@@ -26,11 +26,10 @@
 #include <vector>
 
 /**
- * Live GShang ChArUco calibration helper for CameraBase.
+ * @brief CameraBase 在线标定辅助器。
  *
- * CameraBase owns the image publishing gate. When this helper is active,
- * CameraBase::CommitImage() gives each frame to ProcessFrame() and returns
- * without calling the downstream CameraFrameSync publish callback.
+ * CameraBase 持有图像发布闸门。标定激活时，CameraBase::CommitImage() 会先把帧交给
+ * ProcessFrame()；如果该帧被标定流程接管，就不再调用后级 CameraFrameSync 的发布回调。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class CameraBaseCalibration
@@ -64,14 +63,14 @@ class CameraBaseCalibration
     if (!ParseMarkerMm(marker_size_text, marker_mm))
     {
       const std::string marker_size(marker_size_text);
-      XR_LOG_ERROR("Camera calibration: invalid marker size: %s",
+      XR_LOG_ERROR("相机标定：标记尺寸无效：%s",
                    marker_size.c_str());
       return false;
     }
 
     if (cols < 2 || rows < 2)
     {
-      XR_LOG_ERROR("Camera calibration: invalid board geometry cols=%d rows=%d",
+      XR_LOG_ERROR("相机标定：标定板行列无效 cols=%d rows=%d",
                    cols, rows);
       return false;
     }
@@ -89,7 +88,7 @@ class CameraBaseCalibration
     std::filesystem::create_directories(debug_dir_, ec);
     if (ec)
     {
-      XR_LOG_ERROR("Camera calibration: failed to create output dir %s: %s",
+      XR_LOG_ERROR("相机标定：创建输出目录失败 %s: %s",
                    output_dir_.c_str(), ec.message().c_str());
       return false;
     }
@@ -99,9 +98,9 @@ class CameraBaseCalibration
     active_ = true;
     active_fast_.store(true, std::memory_order_release);
 
-    XR_LOG_INFO("Camera calibration started: marker=%.3f mm board=%dx%d "
-                "square=%.3f mm min_markers=%d recommended_views=%d "
-                "max_views=%d output=%s",
+    XR_LOG_INFO("相机标定已启动：标记=%.3f mm 标定板=%dx%d "
+                "方格=%.3f mm 最少标记=%d 建议视角=%d "
+                "最多视角=%d 输出=%s",
                 config_.marker_mm, config_.cols, config_.rows,
                 SquareMm(config_), config_.min_markers,
                 config_.recommended_views, config_.max_stored_views,
@@ -110,8 +109,7 @@ class CameraBaseCalibration
   }
 
   /**
-   * Returns true when calibration owns this frame and normal image publishing
-   * must be skipped.
+   * @return true 表示该帧被标定流程接管，正常图像发布必须跳过。
    */
   bool ProcessFrame(const uint8_t* data, uint64_t timestamp_us)
   {
@@ -156,7 +154,7 @@ class CameraBaseCalibration
     std::lock_guard<std::mutex> lock(mutex_);
     active_ = false;
     active_fast_.store(false, std::memory_order_release);
-    XR_LOG_INFO("Camera calibration stopped: views=%llu output=%s",
+    XR_LOG_INFO("相机标定已停止：视角=%llu 输出=%s",
                 static_cast<unsigned long long>(accepted_views_.size()),
                 output_dir_.c_str());
   }
@@ -171,14 +169,14 @@ class CameraBaseCalibration
       std::lock_guard<std::mutex> lock(mutex_);
       if (static_cast<int>(accepted_views_.size()) < kMinimumCalibrationViews)
       {
-        XR_LOG_WARN("Camera calibration: need at least %d views, got %llu",
+        XR_LOG_WARN("相机标定：至少需要 %d 个视角，当前只有 %llu 个",
                     kMinimumCalibrationViews,
                     static_cast<unsigned long long>(accepted_views_.size()));
         return false;
       }
 
-      // Saving ends calibration. If numerical calibration fails, image
-      // publishing still resumes and the operator can restart a fresh run.
+      // 保存命令会结束本次标定。即使数值求解失败，也恢复图像发布，
+      // 操作手可以调整姿态后重新开始一轮。
       active_ = false;
       active_fast_.store(false, std::memory_order_release);
       views = accepted_views_;
@@ -203,20 +201,20 @@ class CameraBaseCalibration
   {
     std::lock_guard<std::mutex> lock(mutex_);
     std::ostringstream os;
-    os << "Calibration active=" << (active_ ? 1 : 0)
-       << " finished=" << (finished_ ? 1 : 0)
-       << " views=" << accepted_views_.size()
-       << " recommended=" << config_.recommended_views
-       << " max=" << config_.max_stored_views
-       << " save_ready="
+    os << "标定 激活=" << (active_ ? 1 : 0)
+       << " 完成=" << (finished_ ? 1 : 0)
+       << " 视角=" << accepted_views_.size()
+       << " 建议=" << config_.recommended_views
+       << " 上限=" << config_.max_stored_views
+       << " 可保存="
        << (accepted_views_.size() >= kMinimumCalibrationViews ? 1 : 0)
-       << " processed=" << processed_frames_
-       << " detected=" << detected_frames_
-       << " swallowed=" << swallowed_frames_
-       << " board=" << config_.cols << "x" << config_.rows
-       << " marker_mm=" << config_.marker_mm
-       << " square_mm=" << SquareMm(config_)
-       << " output=" << output_dir_;
+       << " 已处理=" << processed_frames_
+       << " 已检测=" << detected_frames_
+       << " 已截断发布=" << swallowed_frames_
+       << " 标定板=" << config_.cols << "x" << config_.rows
+       << " 标记mm=" << config_.marker_mm
+       << " 方格mm=" << SquareMm(config_)
+       << " 输出=" << output_dir_;
     if (last_rms_ >= 0.0)
     {
       os << " rms=" << last_rms_ << " yaml=" << last_saved_yaml_;
@@ -346,7 +344,7 @@ class CameraBaseCalibration
     }
     catch (const cv::Exception& e)
     {
-      XR_LOG_ERROR("Camera calibration: detectMarkers failed: %s", e.what());
+      XR_LOG_ERROR("相机标定：detectMarkers 失败：%s", e.what());
       return false;
     }
 
@@ -389,7 +387,7 @@ class CameraBaseCalibration
     {
       if (!max_views_logged_)
       {
-        XR_LOG_WARN("Camera calibration reached max stored views=%d; run cali save or cali stop",
+        XR_LOG_WARN("相机标定：已达到最多存储视角 %d，请执行 cali save 或 cali stop",
                     config_.max_stored_views);
         max_views_logged_ = true;
       }
@@ -412,7 +410,7 @@ class CameraBaseCalibration
     stored.used_markers = detection.used_markers;
     stored.homography_rms = detection.homography_rms;
 
-    XR_LOG_INFO("Camera calibration accepted view %llu: markers=%d H-rms=%.3f ts=%llu",
+    XR_LOG_INFO("相机标定：接受视角 %llu，标记=%d H-rms=%.3f ts=%llu",
                 static_cast<unsigned long long>(accepted_views_.size()),
                 detection.used_markers, detection.homography_rms,
                 static_cast<unsigned long long>(snapshot.timestamp_us));
@@ -420,7 +418,7 @@ class CameraBaseCalibration
     if (!recommended_views_logged_ &&
         static_cast<int>(accepted_views_.size()) >= config_.recommended_views)
     {
-      XR_LOG_INFO("Camera calibration has %d recommended views; move more if needed or run cali save",
+      XR_LOG_INFO("相机标定：已达到建议视角数 %d，可继续移动取样，或执行 cali save",
                   config_.recommended_views);
       recommended_views_logged_ = true;
     }
@@ -435,7 +433,7 @@ class CameraBaseCalibration
       return;
     }
     unsupported_encoding_logged_ = true;
-    XR_LOG_ERROR("Camera calibration: unsupported CameraBase encoding=%u",
+    XR_LOG_ERROR("相机标定：当前图像编码暂不支持 encoding=%u",
                  static_cast<unsigned>(CameraInfoV.encoding));
   }
 
@@ -510,10 +508,11 @@ class CameraBaseCalibration
   }
 
   /**
-   * GShang ChArUco generator places ArUco-original 5-bit markers only on
-   * checker cells where (row + col) is odd. Its visual square is wider than
-   * markerSize: one white cell around the 5-bit marker plus the checker edge
-   * makes square_mm = marker_mm * 9 / 7.
+   * @brief 生成 GShang 在线工具对应的 ChArUco 三维角点表。
+   *
+   * GShang 工具在 (row + col) 为奇数的棋盘格中放置 ArUco-original 5-bit 标记。
+   * 该工具里的 markerSize 不是完整方格宽度：5-bit 标记外侧还有白边和棋盘边界，
+   * 因此实际方格宽度为 square_mm = marker_mm * 9 / 7。
    */
   static BoardMap MakeGShangMarkerMap(const Config& config)
   {
@@ -730,7 +729,7 @@ class CameraBaseCalibration
     }
     catch (const cv::Exception& e)
     {
-      XR_LOG_ERROR("Camera calibration: calibrateCamera failed: %s", e.what());
+      XR_LOG_ERROR("相机标定：calibrateCamera 失败：%s", e.what());
       return false;
     }
 
@@ -755,7 +754,7 @@ class CameraBaseCalibration
       }
       catch (const cv::Exception& e)
       {
-        XR_LOG_WARN("Camera calibration: filtered calibration failed: %s", e.what());
+        XR_LOG_WARN("相机标定：剔除离群视角后的标定失败：%s", e.what());
       }
 
       if (!filtered_camera_matrix.empty())
@@ -773,7 +772,7 @@ class CameraBaseCalibration
     std::filesystem::create_directories(output_dir, ec);
     if (ec)
     {
-      XR_LOG_ERROR("Camera calibration: failed to create output dir %s: %s",
+      XR_LOG_ERROR("相机标定：创建输出目录失败 %s: %s",
                    output_dir.c_str(), ec.message().c_str());
       return false;
     }
@@ -792,7 +791,7 @@ class CameraBaseCalibration
 
     output.rms = rms;
     output.yaml_path = yaml_path.string();
-    XR_LOG_PASS("Camera calibration saved: views=%llu rms=%.4f yaml=%s",
+    XR_LOG_PASS("相机标定结果已保存：视角=%llu rms=%.4f yaml=%s",
                 static_cast<unsigned long long>(final_views.size()), rms,
                 output.yaml_path.c_str());
     return true;
@@ -910,7 +909,7 @@ class CameraBaseCalibration
     }
     catch (const cv::Exception& e)
     {
-      XR_LOG_WARN("Camera calibration: failed to write debug image %s: %s",
+      XR_LOG_WARN("相机标定：写入调试图失败 %s: %s",
                   path.string().c_str(), e.what());
     }
   }
