@@ -25,14 +25,23 @@
 #include <string_view>
 #include <vector>
 
+/**
+ * Live GShang ChArUco calibration helper for CameraBase.
+ *
+ * CameraBase owns the image publishing gate. When this helper is active,
+ * CameraBase::CommitImage() gives each frame to ProcessFrame() and returns
+ * without calling the downstream CameraFrameSync publish callback.
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 class CameraBaseCalibration
 {
  public:
-  static constexpr int gshang_dictionary_bits = 5;
-  static constexpr int gshang_marker_cells = gshang_dictionary_bits + 2;
-  static constexpr int gshang_square_cells = gshang_dictionary_bits + 4;
-  static constexpr int min_calibration_views = 8;
+  static constexpr int kGShangDictionaryBits = 5;
+  static constexpr int kGShangMarkerCells = kGShangDictionaryBits + 2;
+  static constexpr int kGShangSquareCells = kGShangDictionaryBits + 4;
+  static constexpr int kMinimumCalibrationViews = 8;
+  static constexpr int kDefaultRecommendedViews = 120;
+  static constexpr int kDefaultMaxStoredViews = 300;
 
   struct Config
   {
@@ -40,21 +49,12 @@ class CameraBaseCalibration
     int cols = 8;
     int rows = 6;
     int min_markers = 12;
-    int target_views = 50;
+    int recommended_views = kDefaultRecommendedViews;
+    int max_stored_views = kDefaultMaxStoredViews;
     int process_stride = 3;
-    uint64_t min_accept_interval_us = 250000;
+    uint64_t min_accept_interval_us = 200000;
     double max_homography_rms = 2.5;
     double max_reprojection_rms = 3.0;
-  };
-
-  struct Candidate
-  {
-    uint64_t frame_index = 0;
-    uint64_t timestamp_us = 0;
-    int used_markers = 0;
-    double homography_rms = 0.0;
-    std::vector<cv::Point3f> object_points;
-    std::vector<cv::Point2f> image_points;
   };
 
   bool Start(std::string_view marker_size_text, int cols, int rows,
@@ -68,6 +68,7 @@ class CameraBaseCalibration
                    marker_size.c_str());
       return false;
     }
+
     if (cols < 2 || rows < 2)
     {
       XR_LOG_ERROR("Camera calibration: invalid board geometry cols=%d rows=%d",
@@ -76,19 +77,13 @@ class CameraBaseCalibration
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    cfg_ = Config{};
-    cfg_.marker_mm = marker_mm;
-    cfg_.cols = cols;
-    cfg_.rows = rows;
-    const int marker_count = (rows * cols) / 2;
-    cfg_.min_markers = std::max(4, std::min(marker_count, (marker_count * 2 + 2) / 3));
-
-    board_ = MakeGShangCharucoMap(cfg_.rows, cfg_.cols, cfg_.marker_mm);
+    config_ = MakeConfig(marker_mm, cols, rows);
+    board_ = MakeGShangMarkerMap(config_);
     dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_ARUCO_ORIGINAL);
     detector_params_ = cv::aruco::DetectorParameters::create();
     detector_params_->cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
 
-    output_dir_ = BuildOutputDir(camera_name, cfg_);
+    output_dir_ = BuildOutputDir(camera_name, config_);
     debug_dir_ = (std::filesystem::path(output_dir_) / "debug").string();
     std::error_code ec;
     std::filesystem::create_directories(debug_dir_, ec);
@@ -99,26 +94,25 @@ class CameraBaseCalibration
       return false;
     }
 
-    accepted_.clear();
-    last_rms_ = -1.0;
-    last_saved_yaml_.clear();
-    swallowed_frames_ = 0;
-    processed_frames_ = 0;
-    detected_frames_ = 0;
-    frame_index_ = 0;
-    last_accept_timestamp_us_ = 0;
-    unsupported_encoding_logged_ = false;
-    finished_ = false;
+    accepted_views_.clear();
+    ResetCountersLocked();
     active_ = true;
     active_fast_.store(true, std::memory_order_release);
 
-    XR_LOG_INFO("Camera calibration started: marker=%.3f mm cols=%d rows=%d "
-                "square=%.3f mm min_markers=%d target_views=%d output=%s",
-                cfg_.marker_mm, cfg_.cols, cfg_.rows, SquareMm(cfg_),
-                cfg_.min_markers, cfg_.target_views, output_dir_.c_str());
+    XR_LOG_INFO("Camera calibration started: marker=%.3f mm board=%dx%d "
+                "square=%.3f mm min_markers=%d recommended_views=%d "
+                "max_views=%d output=%s",
+                config_.marker_mm, config_.cols, config_.rows,
+                SquareMm(config_), config_.min_markers,
+                config_.recommended_views, config_.max_stored_views,
+                output_dir_.c_str());
     return true;
   }
 
+  /**
+   * Returns true when calibration owns this frame and normal image publishing
+   * must be skipped.
+   */
   bool ProcessFrame(const uint8_t* data, uint64_t timestamp_us)
   {
     if (!active_fast_.load(std::memory_order_acquire))
@@ -126,95 +120,34 @@ class CameraBaseCalibration
       return false;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!active_)
+    FrameSnapshot snapshot;
+    const FrameAction action = PrepareFrame(data, timestamp_us, snapshot);
+    if (action == FrameAction::kPublish)
     {
       return false;
     }
-
-    ++swallowed_frames_;
-    ++frame_index_;
-    if (data == nullptr || cfg_.process_stride <= 0 ||
-        (frame_index_ % static_cast<uint64_t>(cfg_.process_stride)) != 0)
+    if (action == FrameAction::kSwallow)
     {
       return true;
     }
 
-    cv::Mat image = MakeImageView(data);
+    Detection detection;
+    const cv::Mat image = MakeImageView(data);
     if (image.empty())
     {
-      if (!unsupported_encoding_logged_)
-      {
-        XR_LOG_ERROR("Camera calibration: unsupported CameraBase encoding=%u",
-                     static_cast<unsigned>(CameraInfoV.encoding));
-        unsupported_encoding_logged_ = true;
-      }
+      LogUnsupportedEncodingOnce();
       return true;
     }
-
-    ++processed_frames_;
-    std::vector<std::vector<cv::Point2f>> corners;
-    std::vector<std::vector<cv::Point2f>> rejected;
-    cv::Mat ids;
-    try
-    {
-      cv::aruco::detectMarkers(image, dictionary_, corners, ids, detector_params_, rejected);
-    }
-    catch (const cv::Exception& e)
-    {
-      XR_LOG_ERROR("Camera calibration: detectMarkers failed: %s", e.what());
-      return true;
-    }
-
-    std::vector<cv::Point3f> object_points;
-    std::vector<cv::Point2f> image_points;
-    int used_markers = 0;
-    if (!CollectPoints(corners, ids, board_, object_points, image_points, used_markers))
-    {
-      return true;
-    }
-    ++detected_frames_;
-
-    const double h_rms = HomographyRms(object_points, image_points);
-    if (used_markers < cfg_.min_markers || h_rms > cfg_.max_homography_rms)
-    {
-      return true;
-    }
-    if (last_accept_timestamp_us_ != 0 &&
-        timestamp_us > last_accept_timestamp_us_ &&
-        timestamp_us - last_accept_timestamp_us_ < cfg_.min_accept_interval_us)
+    if (!DetectUsableView(image, snapshot, detection))
     {
       return true;
     }
 
-    Candidate candidate;
-    candidate.frame_index = frame_index_;
-    candidate.timestamp_us = timestamp_us;
-    candidate.used_markers = used_markers;
-    candidate.homography_rms = h_rms;
-    candidate.object_points = std::move(object_points);
-    candidate.image_points = std::move(image_points);
-    accepted_.push_back(std::move(candidate));
-    last_accept_timestamp_us_ = timestamp_us;
-
-    const Candidate& accepted = accepted_.back();
-    SaveDebugImage(image, corners, ids, accepted);
-    XR_LOG_INFO("Camera calibration accepted view %llu/%d: markers=%d H-rms=%.3f ts=%llu",
-                static_cast<unsigned long long>(accepted_.size()), cfg_.target_views,
-                accepted.used_markers,
-                accepted.homography_rms,
-                static_cast<unsigned long long>(accepted.timestamp_us));
-
-    if (static_cast<int>(accepted_.size()) >= cfg_.target_views)
+    StoredView stored;
+    if (StoreDetection(snapshot, detection, stored))
     {
-      const bool ok = CalibrateAndWrite();
-      active_ = false;
-      active_fast_.store(false, std::memory_order_release);
-      finished_ = ok;
-      XR_LOG_INFO("Camera calibration auto-finished: ok=%d output=%s",
-                  ok ? 1 : 0, output_dir_.c_str());
+      SaveDebugImage(image, detection, stored);
     }
-
     return true;
   }
 
@@ -224,20 +157,46 @@ class CameraBaseCalibration
     active_ = false;
     active_fast_.store(false, std::memory_order_release);
     XR_LOG_INFO("Camera calibration stopped: views=%llu output=%s",
-                static_cast<unsigned long long>(accepted_.size()), output_dir_.c_str());
+                static_cast<unsigned long long>(accepted_views_.size()),
+                output_dir_.c_str());
   }
 
   bool SaveAndStop()
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const bool ok = CalibrateAndWrite();
-    if (ok)
+    std::vector<View> views;
+    Config config;
+    std::string output_dir;
+
     {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (static_cast<int>(accepted_views_.size()) < kMinimumCalibrationViews)
+      {
+        XR_LOG_WARN("Camera calibration: need at least %d views, got %llu",
+                    kMinimumCalibrationViews,
+                    static_cast<unsigned long long>(accepted_views_.size()));
+        return false;
+      }
+
+      // Saving ends calibration. If numerical calibration fails, image
+      // publishing still resumes and the operator can restart a fresh run.
       active_ = false;
       active_fast_.store(false, std::memory_order_release);
-      finished_ = true;
+      views = accepted_views_;
+      config = config_;
+      output_dir = output_dir_;
     }
-    return ok;
+
+    CalibrationOutput output;
+    if (!CalibrateAndWrite(views, config, output_dir, output))
+    {
+      return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    finished_ = true;
+    last_rms_ = output.rms;
+    last_saved_yaml_ = output.yaml_path;
+    return true;
   }
 
   std::string StatusString() const
@@ -246,13 +205,17 @@ class CameraBaseCalibration
     std::ostringstream os;
     os << "Calibration active=" << (active_ ? 1 : 0)
        << " finished=" << (finished_ ? 1 : 0)
-       << " views=" << accepted_.size() << "/" << cfg_.target_views
+       << " views=" << accepted_views_.size()
+       << " recommended=" << config_.recommended_views
+       << " max=" << config_.max_stored_views
+       << " save_ready="
+       << (accepted_views_.size() >= kMinimumCalibrationViews ? 1 : 0)
        << " processed=" << processed_frames_
        << " detected=" << detected_frames_
        << " swallowed=" << swallowed_frames_
-       << " board=" << cfg_.cols << "x" << cfg_.rows
-       << " marker_mm=" << cfg_.marker_mm
-       << " square_mm=" << SquareMm(cfg_)
+       << " board=" << config_.cols << "x" << config_.rows
+       << " marker_mm=" << config_.marker_mm
+       << " square_mm=" << SquareMm(config_)
        << " output=" << output_dir_;
     if (last_rms_ >= 0.0)
     {
@@ -262,12 +225,224 @@ class CameraBaseCalibration
   }
 
  private:
-  using BoardMap = std::map<int, std::array<cv::Point3f, 4>>;
+  using MarkerCorners = std::array<cv::Point3f, 4>;
+  using BoardMap = std::map<int, MarkerCorners>;
 
-  static double SquareMm(const Config& cfg)
+  struct View
   {
-    return cfg.marker_mm * static_cast<double>(gshang_square_cells) /
-           static_cast<double>(gshang_marker_cells);
+    uint64_t frame_index = 0;
+    uint64_t timestamp_us = 0;
+    int used_markers = 0;
+    double homography_rms = 0.0;
+    std::vector<cv::Point3f> object_points;
+    std::vector<cv::Point2f> image_points;
+  };
+
+  struct FrameSnapshot
+  {
+    Config config;
+    BoardMap board;
+    cv::Ptr<cv::aruco::Dictionary> dictionary;
+    cv::Ptr<cv::aruco::DetectorParameters> detector_params;
+    uint64_t frame_index = 0;
+    uint64_t timestamp_us = 0;
+  };
+
+  struct Detection
+  {
+    int used_markers = 0;
+    double homography_rms = 0.0;
+    std::vector<cv::Point3f> object_points;
+    std::vector<cv::Point2f> image_points;
+    std::vector<std::vector<cv::Point2f>> marker_corners;
+    cv::Mat marker_ids;
+  };
+
+  struct StoredView
+  {
+    std::string debug_dir;
+    std::size_t view_number = 0;
+    uint64_t frame_index = 0;
+    int used_markers = 0;
+    double homography_rms = 0.0;
+  };
+
+  struct CalibrationOutput
+  {
+    double rms = -1.0;
+    std::string yaml_path;
+  };
+
+  enum class FrameAction
+  {
+    kPublish,
+    kSwallow,
+    kProcess,
+  };
+
+  static Config MakeConfig(double marker_mm, int cols, int rows)
+  {
+    Config config{};
+    config.marker_mm = marker_mm;
+    config.cols = cols;
+    config.rows = rows;
+
+    const int marker_count = (rows * cols) / 2;
+    config.min_markers = std::max(4, std::min(marker_count, (marker_count * 2 + 2) / 3));
+    return config;
+  }
+
+  void ResetCountersLocked()
+  {
+    raw_frame_index_ = 0;
+    swallowed_frames_ = 0;
+    processed_frames_ = 0;
+    detected_frames_ = 0;
+    last_accept_timestamp_us_ = 0;
+    last_rms_ = -1.0;
+    last_saved_yaml_.clear();
+    finished_ = false;
+    unsupported_encoding_logged_ = false;
+    recommended_views_logged_ = false;
+    max_views_logged_ = false;
+  }
+
+  FrameAction PrepareFrame(const uint8_t* data, uint64_t timestamp_us,
+                           FrameSnapshot& snapshot)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_)
+    {
+      return FrameAction::kPublish;
+    }
+
+    ++swallowed_frames_;
+    ++raw_frame_index_;
+    if (data == nullptr || config_.process_stride <= 0 ||
+        (raw_frame_index_ % static_cast<uint64_t>(config_.process_stride)) != 0)
+    {
+      return FrameAction::kSwallow;
+    }
+
+    ++processed_frames_;
+    snapshot.config = config_;
+    snapshot.board = board_;
+    snapshot.dictionary = dictionary_;
+    snapshot.detector_params = detector_params_;
+    snapshot.frame_index = raw_frame_index_;
+    snapshot.timestamp_us = timestamp_us;
+    return FrameAction::kProcess;
+  }
+
+  bool DetectUsableView(const cv::Mat& image, const FrameSnapshot& snapshot,
+                        Detection& detection)
+  {
+    std::vector<std::vector<cv::Point2f>> rejected;
+    try
+    {
+      cv::aruco::detectMarkers(image, snapshot.dictionary,
+                               detection.marker_corners, detection.marker_ids,
+                               snapshot.detector_params, rejected);
+    }
+    catch (const cv::Exception& e)
+    {
+      XR_LOG_ERROR("Camera calibration: detectMarkers failed: %s", e.what());
+      return false;
+    }
+
+    if (!CollectPoints(detection.marker_corners, detection.marker_ids,
+                       snapshot.board, detection.object_points,
+                       detection.image_points, detection.used_markers))
+    {
+      return false;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++detected_frames_;
+    }
+
+    detection.homography_rms =
+        HomographyRms(detection.object_points, detection.image_points);
+    return detection.used_markers >= snapshot.config.min_markers &&
+           detection.homography_rms <= snapshot.config.max_homography_rms;
+  }
+
+  bool StoreDetection(const FrameSnapshot& snapshot, const Detection& detection,
+                      StoredView& stored)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_)
+    {
+      return false;
+    }
+
+    if (last_accept_timestamp_us_ != 0 &&
+        snapshot.timestamp_us > last_accept_timestamp_us_ &&
+        snapshot.timestamp_us - last_accept_timestamp_us_ <
+            config_.min_accept_interval_us)
+    {
+      return false;
+    }
+
+    if (static_cast<int>(accepted_views_.size()) >= config_.max_stored_views)
+    {
+      if (!max_views_logged_)
+      {
+        XR_LOG_WARN("Camera calibration reached max stored views=%d; run cali save or cali stop",
+                    config_.max_stored_views);
+        max_views_logged_ = true;
+      }
+      return false;
+    }
+
+    View view;
+    view.frame_index = snapshot.frame_index;
+    view.timestamp_us = snapshot.timestamp_us;
+    view.used_markers = detection.used_markers;
+    view.homography_rms = detection.homography_rms;
+    view.object_points = detection.object_points;
+    view.image_points = detection.image_points;
+    accepted_views_.push_back(std::move(view));
+    last_accept_timestamp_us_ = snapshot.timestamp_us;
+
+    stored.debug_dir = debug_dir_;
+    stored.view_number = accepted_views_.size();
+    stored.frame_index = snapshot.frame_index;
+    stored.used_markers = detection.used_markers;
+    stored.homography_rms = detection.homography_rms;
+
+    XR_LOG_INFO("Camera calibration accepted view %llu: markers=%d H-rms=%.3f ts=%llu",
+                static_cast<unsigned long long>(accepted_views_.size()),
+                detection.used_markers, detection.homography_rms,
+                static_cast<unsigned long long>(snapshot.timestamp_us));
+
+    if (!recommended_views_logged_ &&
+        static_cast<int>(accepted_views_.size()) >= config_.recommended_views)
+    {
+      XR_LOG_INFO("Camera calibration has %d recommended views; move more if needed or run cali save",
+                  config_.recommended_views);
+      recommended_views_logged_ = true;
+    }
+    return true;
+  }
+
+  void LogUnsupportedEncodingOnce()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (unsupported_encoding_logged_)
+    {
+      return;
+    }
+    unsupported_encoding_logged_ = true;
+    XR_LOG_ERROR("Camera calibration: unsupported CameraBase encoding=%u",
+                 static_cast<unsigned>(CameraInfoV.encoding));
+  }
+
+  static double SquareMm(const Config& config)
+  {
+    return config.marker_mm * static_cast<double>(kGShangSquareCells) /
+           static_cast<double>(kGShangMarkerCells);
   }
 
   static bool ParseMarkerMm(std::string_view text, double& marker_mm)
@@ -284,10 +459,12 @@ class CameraBaseCalibration
 
     char* end = nullptr;
     const double parsed = std::strtod(value.c_str(), &end);
-    if (end == value.c_str() || *end != '\0' || parsed <= 0.0 || !std::isfinite(parsed))
+    if (end == value.c_str() || *end != '\0' || parsed <= 0.0 ||
+        !std::isfinite(parsed))
     {
       return false;
     }
+
     marker_mm = parsed;
     return true;
   }
@@ -308,11 +485,7 @@ class CameraBaseCalibration
         out.push_back('_');
       }
     }
-    if (out.empty())
-    {
-      out = "camera";
-    }
-    return out;
+    return out.empty() ? "camera" : out;
   }
 
   static std::string TimeStampString()
@@ -320,41 +493,49 @@ class CameraBaseCalibration
     std::time_t now = std::time(nullptr);
     std::tm tm_buf{};
     localtime_r(&now, &tm_buf);
+
     char buf[32]{};
     std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm_buf);
     return std::string(buf);
   }
 
-  static std::string BuildOutputDir(std::string_view camera_name, const Config& cfg)
+  static std::string BuildOutputDir(std::string_view camera_name,
+                                    const Config& config)
   {
     std::ostringstream leaf;
     leaf << TimeStampString() << "_" << Sanitize(camera_name) << "_"
-         << std::fixed << std::setprecision(0) << cfg.marker_mm << "mm_"
-         << cfg.cols << "x" << cfg.rows;
+         << std::fixed << std::setprecision(0) << config.marker_mm << "mm_"
+         << config.cols << "x" << config.rows;
     return (std::filesystem::path("runs") / "camera_calib" / leaf.str()).string();
   }
 
-  static BoardMap MakeGShangCharucoMap(int rows, int cols, double marker_mm)
+  /**
+   * GShang ChArUco generator places ArUco-original 5-bit markers only on
+   * checker cells where (row + col) is odd. Its visual square is wider than
+   * markerSize: one white cell around the 5-bit marker plus the checker edge
+   * makes square_mm = marker_mm * 9 / 7.
+   */
+  static BoardMap MakeGShangMarkerMap(const Config& config)
   {
-    const double cell_mm = marker_mm / static_cast<double>(gshang_marker_cells);
-    const double square_mm = cell_mm * static_cast<double>(gshang_square_cells);
+    const double cell_mm = config.marker_mm / static_cast<double>(kGShangMarkerCells);
+    const double square_mm = cell_mm * static_cast<double>(kGShangSquareCells);
     const double marker_offset_mm = cell_mm;
 
     BoardMap map;
     int marker_id = 0;
-    for (int r = 0; r < rows; ++r)
+    for (int row = 0; row < config.rows; ++row)
     {
-      for (int c = 0; c < cols; ++c)
+      for (int col = 0; col < config.cols; ++col)
       {
-        if (((r + c) % 2) == 0)
+        if (((row + col) % 2) == 0)
         {
           continue;
         }
 
-        const float x0 = static_cast<float>(c * square_mm + marker_offset_mm);
-        const float y0 = static_cast<float>(r * square_mm + marker_offset_mm);
-        const float x1 = x0 + static_cast<float>(marker_mm);
-        const float y1 = y0 + static_cast<float>(marker_mm);
+        const float x0 = static_cast<float>(col * square_mm + marker_offset_mm);
+        const float y0 = static_cast<float>(row * square_mm + marker_offset_mm);
+        const float x1 = x0 + static_cast<float>(config.marker_mm);
+        const float y1 = y0 + static_cast<float>(config.marker_mm);
         map[marker_id++] = {cv::Point3f{x0, y0, 0.0F},
                             cv::Point3f{x1, y0, 0.0F},
                             cv::Point3f{x1, y1, 0.0F},
@@ -365,8 +546,7 @@ class CameraBaseCalibration
   }
 
   static bool CollectPoints(const std::vector<std::vector<cv::Point2f>>& corners,
-                            const cv::Mat& ids,
-                            const BoardMap& board,
+                            const cv::Mat& ids, const BoardMap& board,
                             std::vector<cv::Point3f>& object_points,
                             std::vector<cv::Point2f>& image_points,
                             int& used_markers)
@@ -385,15 +565,17 @@ class CameraBaseCalibration
       {
         continue;
       }
+
       const int id = ids.at<int>(i, 0);
-      const auto it = board.find(id);
-      if (it == board.end())
+      const auto marker = board.find(id);
+      if (marker == board.end())
       {
         continue;
       }
+
       for (int corner = 0; corner < 4; ++corner)
       {
-        object_points.push_back(it->second[corner]);
+        object_points.push_back(marker->second[corner]);
         image_points.push_back(corners[i][corner]);
       }
       ++used_markers;
@@ -416,32 +598,14 @@ class CameraBaseCalibration
       object_xy.emplace_back(point.x, point.y);
     }
 
-    const cv::Mat h = cv::findHomography(object_xy, image_points, 0);
-    if (h.empty())
+    const cv::Mat homography = cv::findHomography(object_xy, image_points, 0);
+    if (homography.empty())
     {
       return 1e9;
     }
 
     std::vector<cv::Point2f> projected;
-    cv::perspectiveTransform(object_xy, projected, h);
-    double sum2 = 0.0;
-    for (std::size_t i = 0; i < image_points.size(); ++i)
-    {
-      const cv::Point2f delta = projected[i] - image_points[i];
-      sum2 += delta.dot(delta);
-    }
-    return std::sqrt(sum2 / static_cast<double>(image_points.size()));
-  }
-
-  static double ReprojectionRms(const std::vector<cv::Point3f>& object_points,
-                                const std::vector<cv::Point2f>& image_points,
-                                const cv::Mat& camera_matrix,
-                                const cv::Mat& distortion,
-                                const cv::Mat& rvec,
-                                const cv::Mat& tvec)
-  {
-    std::vector<cv::Point2f> projected;
-    cv::projectPoints(object_points, rvec, tvec, camera_matrix, distortion, projected);
+    cv::perspectiveTransform(object_xy, projected, homography);
 
     double sum2 = 0.0;
     for (std::size_t i = 0; i < image_points.size(); ++i)
@@ -450,21 +614,6 @@ class CameraBaseCalibration
       sum2 += delta.dot(delta);
     }
     return std::sqrt(sum2 / static_cast<double>(image_points.size()));
-  }
-
-  static std::vector<Candidate> FilterViews(const std::vector<Candidate>& views,
-                                            const std::vector<double>& per_view_rms,
-                                            double max_rms)
-  {
-    std::vector<Candidate> filtered;
-    for (std::size_t i = 0; i < views.size(); ++i)
-    {
-      if (i < per_view_rms.size() && per_view_rms[i] <= max_rms)
-      {
-        filtered.push_back(views[i]);
-      }
-    }
-    return filtered;
   }
 
   cv::Mat MakeImageView(const uint8_t* data) const
@@ -493,140 +642,175 @@ class CameraBaseCalibration
     }
   }
 
-  bool RunCalibration(const std::vector<Candidate>& views,
-                      cv::Mat& camera_matrix,
-                      cv::Mat& distortion,
-                      double& rms,
-                      std::vector<cv::Mat>& rvecs,
-                      std::vector<cv::Mat>& tvecs) const
+  static bool CalibrateViews(const std::vector<View>& views,
+                             cv::Mat& camera_matrix, cv::Mat& distortion,
+                             double& rms, std::vector<cv::Mat>& rvecs,
+                             std::vector<cv::Mat>& tvecs)
   {
-    if (static_cast<int>(views.size()) < min_calibration_views)
-    {
-      XR_LOG_WARN("Camera calibration: need at least %d views, got %llu",
-                  min_calibration_views,
-                  static_cast<unsigned long long>(views.size()));
-      return false;
-    }
-
     std::vector<std::vector<cv::Point3f>> object_points;
     std::vector<std::vector<cv::Point2f>> image_points;
     object_points.reserve(views.size());
     image_points.reserve(views.size());
-    for (const auto& view : views)
+    for (const View& view : views)
     {
       object_points.push_back(view.object_points);
       image_points.push_back(view.image_points);
     }
 
-    try
-    {
-      rms = cv::calibrateCamera(object_points, image_points,
-                                cv::Size(static_cast<int>(CameraInfoV.width),
-                                         static_cast<int>(CameraInfoV.height)),
-                                camera_matrix, distortion, rvecs, tvecs);
-    }
-    catch (const cv::Exception& e)
-    {
-      XR_LOG_ERROR("Camera calibration: calibrateCamera failed: %s", e.what());
-      return false;
-    }
+    rms = cv::calibrateCamera(
+        object_points, image_points,
+        cv::Size(static_cast<int>(CameraInfoV.width),
+                 static_cast<int>(CameraInfoV.height)),
+        camera_matrix, distortion, rvecs, tvecs);
     return true;
   }
 
-  bool CalibrateAndWrite()
+  static double ReprojectionRms(const View& view, const cv::Mat& camera_matrix,
+                                const cv::Mat& distortion,
+                                const cv::Mat& rvec, const cv::Mat& tvec)
+  {
+    std::vector<cv::Point2f> projected;
+    cv::projectPoints(view.object_points, rvec, tvec,
+                      camera_matrix, distortion, projected);
+
+    double sum2 = 0.0;
+    for (std::size_t i = 0; i < view.image_points.size(); ++i)
+    {
+      const cv::Point2f delta = projected[i] - view.image_points[i];
+      sum2 += delta.dot(delta);
+    }
+    return std::sqrt(sum2 / static_cast<double>(view.image_points.size()));
+  }
+
+  static std::vector<double> PerViewRms(const std::vector<View>& views,
+                                        const cv::Mat& camera_matrix,
+                                        const cv::Mat& distortion,
+                                        const std::vector<cv::Mat>& rvecs,
+                                        const std::vector<cv::Mat>& tvecs)
+  {
+    std::vector<double> rms;
+    rms.reserve(views.size());
+    for (std::size_t i = 0; i < views.size(); ++i)
+    {
+      rms.push_back(ReprojectionRms(views[i], camera_matrix, distortion,
+                                    rvecs[i], tvecs[i]));
+    }
+    return rms;
+  }
+
+  static std::vector<View> FilterByRms(const std::vector<View>& views,
+                                       const std::vector<double>& per_view_rms,
+                                       double max_rms)
+  {
+    std::vector<View> filtered;
+    for (std::size_t i = 0; i < views.size(); ++i)
+    {
+      if (i < per_view_rms.size() && per_view_rms[i] <= max_rms)
+      {
+        filtered.push_back(views[i]);
+      }
+    }
+    return filtered;
+  }
+
+  static bool CalibrateAndWrite(const std::vector<View>& input_views,
+                                const Config& config,
+                                const std::string& output_dir,
+                                CalibrationOutput& output)
   {
     cv::Mat camera_matrix;
     cv::Mat distortion;
     double rms = 0.0;
     std::vector<cv::Mat> rvecs;
     std::vector<cv::Mat> tvecs;
-    if (!RunCalibration(accepted_, camera_matrix, distortion, rms, rvecs, tvecs))
+
+    try
     {
+      CalibrateViews(input_views, camera_matrix, distortion, rms, rvecs, tvecs);
+    }
+    catch (const cv::Exception& e)
+    {
+      XR_LOG_ERROR("Camera calibration: calibrateCamera failed: %s", e.what());
       return false;
     }
 
-    std::vector<double> per_view_rms;
-    per_view_rms.reserve(accepted_.size());
-    for (std::size_t i = 0; i < accepted_.size(); ++i)
-    {
-      per_view_rms.push_back(ReprojectionRms(accepted_[i].object_points,
-                                             accepted_[i].image_points,
-                                             camera_matrix, distortion,
-                                             rvecs[i], tvecs[i]));
-    }
+    std::vector<View> final_views = input_views;
+    std::vector<double> final_per_view_rms =
+        PerViewRms(input_views, camera_matrix, distortion, rvecs, tvecs);
 
-    std::vector<Candidate> final_views = accepted_;
-    std::vector<double> final_per_view_rms = per_view_rms;
-    std::vector<Candidate> filtered =
-        FilterViews(accepted_, per_view_rms, cfg_.max_reprojection_rms);
-    if (filtered.size() >= min_calibration_views && filtered.size() < accepted_.size())
+    const std::vector<View> filtered =
+        FilterByRms(input_views, final_per_view_rms, config.max_reprojection_rms);
+    if (filtered.size() >= kMinimumCalibrationViews &&
+        filtered.size() < input_views.size())
     {
       cv::Mat filtered_camera_matrix;
       cv::Mat filtered_distortion;
       double filtered_rms = 0.0;
       std::vector<cv::Mat> filtered_rvecs;
       std::vector<cv::Mat> filtered_tvecs;
-      if (RunCalibration(filtered, filtered_camera_matrix, filtered_distortion,
-                         filtered_rms, filtered_rvecs, filtered_tvecs))
+      try
+      {
+        CalibrateViews(filtered, filtered_camera_matrix, filtered_distortion,
+                       filtered_rms, filtered_rvecs, filtered_tvecs);
+      }
+      catch (const cv::Exception& e)
+      {
+        XR_LOG_WARN("Camera calibration: filtered calibration failed: %s", e.what());
+      }
+
+      if (!filtered_camera_matrix.empty())
       {
         camera_matrix = filtered_camera_matrix;
         distortion = filtered_distortion;
         rms = filtered_rms;
         final_views = filtered;
-        final_per_view_rms.clear();
-        for (std::size_t i = 0; i < final_views.size(); ++i)
-        {
-          final_per_view_rms.push_back(ReprojectionRms(final_views[i].object_points,
-                                                       final_views[i].image_points,
-                                                       camera_matrix, distortion,
-                                                       filtered_rvecs[i],
-                                                       filtered_tvecs[i]));
-        }
+        final_per_view_rms = PerViewRms(final_views, camera_matrix, distortion,
+                                        filtered_rvecs, filtered_tvecs);
       }
     }
 
     std::error_code ec;
-    std::filesystem::create_directories(output_dir_, ec);
+    std::filesystem::create_directories(output_dir, ec);
     if (ec)
     {
       XR_LOG_ERROR("Camera calibration: failed to create output dir %s: %s",
-                   output_dir_.c_str(), ec.message().c_str());
+                   output_dir.c_str(), ec.message().c_str());
       return false;
     }
 
     const std::filesystem::path yaml_path =
-        std::filesystem::path(output_dir_) / "calibration.yml";
+        std::filesystem::path(output_dir) / "calibration.yml";
     const std::filesystem::path csv_path =
-        std::filesystem::path(output_dir_) / "views.csv";
+        std::filesystem::path(output_dir) / "views.csv";
     const std::filesystem::path snippet_path =
-        std::filesystem::path(output_dir_) / "camera_info_snippet.txt";
+        std::filesystem::path(output_dir) / "camera_info_snippet.txt";
 
-    WriteCalibrationYaml(yaml_path, camera_matrix, distortion, rms,
+    WriteCalibrationYaml(yaml_path, config, camera_matrix, distortion, rms,
                          static_cast<int>(final_views.size()));
     WriteViewsCsv(csv_path, final_views, final_per_view_rms);
     WriteCameraInfoSnippet(snippet_path, camera_matrix, distortion);
 
-    last_rms_ = rms;
-    last_saved_yaml_ = yaml_path.string();
+    output.rms = rms;
+    output.yaml_path = yaml_path.string();
     XR_LOG_PASS("Camera calibration saved: views=%llu rms=%.4f yaml=%s",
                 static_cast<unsigned long long>(final_views.size()), rms,
-                last_saved_yaml_.c_str());
+                output.yaml_path.c_str());
     return true;
   }
 
-  void WriteCalibrationYaml(const std::filesystem::path& path,
-                            const cv::Mat& camera_matrix,
-                            const cv::Mat& distortion,
-                            double rms,
-                            int views) const
+  static void WriteCalibrationYaml(const std::filesystem::path& path,
+                                   const Config& config,
+                                   const cv::Mat& camera_matrix,
+                                   const cv::Mat& distortion,
+                                   double rms, int views)
   {
     cv::FileStorage fs(path.string(), cv::FileStorage::WRITE);
     fs << "image_width" << static_cast<int>(CameraInfoV.width);
     fs << "image_height" << static_cast<int>(CameraInfoV.height);
-    fs << "rows" << cfg_.rows;
-    fs << "cols" << cfg_.cols;
-    fs << "marker_mm" << cfg_.marker_mm;
-    fs << "square_mm" << SquareMm(cfg_);
+    fs << "rows" << config.rows;
+    fs << "cols" << config.cols;
+    fs << "marker_mm" << config.marker_mm;
+    fs << "square_mm" << SquareMm(config);
     fs << "dictionary" << "aruco_original";
     fs << "generator" << "GShang ChArUco: square = marker * 9 / 7";
     fs << "views" << views;
@@ -635,12 +819,13 @@ class CameraBaseCalibration
     fs << "distortion_coefficients" << distortion;
   }
 
-  void WriteViewsCsv(const std::filesystem::path& path,
-                     const std::vector<Candidate>& views,
-                     const std::vector<double>& per_view_rms) const
+  static void WriteViewsCsv(const std::filesystem::path& path,
+                            const std::vector<View>& views,
+                            const std::vector<double>& per_view_rms)
   {
     std::ofstream csv(path);
-    csv << "frame_index,timestamp_us,used_markers,homography_rms,per_view_reprojection_rms\n";
+    csv << "frame_index,timestamp_us,used_markers,homography_rms,"
+           "per_view_reprojection_rms\n";
     for (std::size_t i = 0; i < views.size(); ++i)
     {
       csv << views[i].frame_index << ","
@@ -651,10 +836,17 @@ class CameraBaseCalibration
     }
   }
 
-  void WriteCameraInfoSnippet(const std::filesystem::path& path,
-                              const cv::Mat& camera_matrix,
-                              const cv::Mat& distortion) const
+  static void WriteCameraInfoSnippet(const std::filesystem::path& path,
+                                     const cv::Mat& camera_matrix,
+                                     const cv::Mat& distortion)
   {
+    std::array<double, 14> distortion_values{};
+    const cv::Mat flat = distortion.reshape(1, 1);
+    for (int i = 0; i < std::min(flat.cols, static_cast<int>(distortion_values.size())); ++i)
+    {
+      distortion_values[static_cast<std::size_t>(i)] = flat.at<double>(0, i);
+    }
+
     std::ofstream out(path);
     out << std::setprecision(17);
     out << "camera_matrix: [";
@@ -670,14 +862,13 @@ class CameraBaseCalibration
 
     out << "distortion_model: CameraTypes::DistortionModel::PLUMB_BOB\n";
     out << "distortion_coefficients: [";
-    const cv::Mat flat = distortion.reshape(1, 1);
-    for (int i = 0; i < std::min(flat.cols, 14); ++i)
+    for (std::size_t i = 0; i < distortion_values.size(); ++i)
     {
       if (i != 0)
       {
         out << ", ";
       }
-      out << flat.at<double>(0, i);
+      out << distortion_values[i];
     }
     out << "]\n";
 
@@ -685,32 +876,34 @@ class CameraBaseCalibration
         << camera_matrix.at<double>(0, 0) << ", 0.0, "
         << camera_matrix.at<double>(0, 2) << ", 0.0, 0.0, "
         << camera_matrix.at<double>(1, 1) << ", "
-        << camera_matrix.at<double>(1, 2) << ", 0.0, 0.0, 0.0, 1.0, 0.0]\n";
+        << camera_matrix.at<double>(1, 2)
+        << ", 0.0, 0.0, 0.0, 1.0, 0.0]\n";
   }
 
-  void SaveDebugImage(const cv::Mat& image,
-                      const std::vector<std::vector<cv::Point2f>>& corners,
-                      const cv::Mat& ids,
-                      const Candidate& candidate) const
+  static void SaveDebugImage(const cv::Mat& image, const Detection& detection,
+                             const StoredView& stored)
   {
     cv::Mat debug = image.clone();
-    if (!ids.empty())
+    if (!detection.marker_ids.empty())
     {
-      cv::aruco::drawDetectedMarkers(debug, corners, ids);
+      cv::aruco::drawDetectedMarkers(debug, detection.marker_corners,
+                                     detection.marker_ids);
     }
 
     std::ostringstream label;
-    label << "view=" << accepted_.size()
-          << " markers=" << candidate.used_markers
+    label << "view=" << stored.view_number
+          << " markers=" << stored.used_markers
           << " H=" << std::fixed << std::setprecision(3)
-          << candidate.homography_rms;
+          << stored.homography_rms;
     cv::putText(debug, label.str(), {20, 45}, cv::FONT_HERSHEY_SIMPLEX,
                 1.0, {0, 255, 0}, 2, cv::LINE_AA);
 
     std::ostringstream name;
-    name << "view_" << std::setw(4) << std::setfill('0') << accepted_.size()
-         << "_frame_" << candidate.frame_index << ".jpg";
-    const std::filesystem::path path = std::filesystem::path(debug_dir_) / name.str();
+    name << "view_" << std::setw(4) << std::setfill('0') << stored.view_number
+         << "_frame_" << stored.frame_index << ".jpg";
+    const std::filesystem::path path =
+        std::filesystem::path(stored.debug_dir) / name.str();
+
     try
     {
       cv::imwrite(path.string(), debug);
@@ -724,19 +917,25 @@ class CameraBaseCalibration
 
   mutable std::mutex mutex_;
   std::atomic<bool> active_fast_{false};
+
   bool active_{false};
   bool finished_{false};
   bool unsupported_encoding_logged_{false};
-  Config cfg_{};
+  bool recommended_views_logged_{false};
+  bool max_views_logged_{false};
+
+  Config config_{};
   BoardMap board_{};
   cv::Ptr<cv::aruco::Dictionary> dictionary_{};
   cv::Ptr<cv::aruco::DetectorParameters> detector_params_{};
-  std::vector<Candidate> accepted_{};
+  std::vector<View> accepted_views_{};
+
   std::string output_dir_{};
   std::string debug_dir_{};
   std::string last_saved_yaml_{};
+
   double last_rms_{-1.0};
-  uint64_t frame_index_{0};
+  uint64_t raw_frame_index_{0};
   uint64_t swallowed_frames_{0};
   uint64_t processed_frames_{0};
   uint64_t detected_frames_{0};
