@@ -74,21 +74,21 @@ class CameraBaseCalibration
     if (!ParseMarkerMm(marker_size_text, marker_mm))
     {
       const std::string marker_size(marker_size_text);
-      XR_LOG_ERROR("相机标定：标记尺寸无效：%s",
+      XR_LOG_ERROR("camera calibration: invalid marker size %s",
                    marker_size.c_str());
       return false;
     }
 
     if (cols < 2 || rows < 2)
     {
-      XR_LOG_ERROR("相机标定：标定板行列无效 cols=%d rows=%d",
+      XR_LOG_ERROR("camera calibration: invalid board cols=%d rows=%d",
                    cols, rows);
       return false;
     }
 
     if constexpr (!kSupportsImageEncoding)
     {
-      XR_LOG_ERROR("相机标定：当前图像编码暂不支持 encoding=%u",
+      XR_LOG_ERROR("camera calibration: unsupported image encoding=%u",
                    static_cast<unsigned>(CameraInfoV.encoding));
       return false;
     }
@@ -106,7 +106,7 @@ class CameraBaseCalibration
     std::filesystem::create_directories(debug_dir_, ec);
     if (ec)
     {
-      XR_LOG_ERROR("相机标定：创建输出目录失败 %s: %s",
+      XR_LOG_ERROR("camera calibration: create output dir failed %s: %s",
                    output_dir_.c_str(), ec.message().c_str());
       return false;
     }
@@ -116,11 +116,11 @@ class CameraBaseCalibration
     active_ = true;
     active_fast_.store(true, std::memory_order_release);
 
-    XR_LOG_INFO("相机标定已启动：标记=%.3f mm 标定板=%dx%d "
-                "方格=%.3f mm 最少标记=%d 建议视角=%d "
-                "最多视角=%d 输出=%s",
-                config_.marker_mm, config_.cols, config_.rows,
-                SquareMm(config_), config_.min_markers,
+    XR_LOG_INFO("camera calibration started: marker=%.3fmm board=%dx%d "
+                "square=%.3fmm min_markers=%d recommended_views=%d "
+                "max_views=%d output=%s",
+                static_cast<float>(config_.marker_mm), config_.cols, config_.rows,
+                static_cast<float>(SquareMm(config_)), config_.min_markers,
                 config_.recommended_views, config_.max_stored_views,
                 output_dir_.c_str());
     return true;
@@ -172,8 +172,8 @@ class CameraBaseCalibration
     std::lock_guard<std::mutex> lock(mutex_);
     active_ = false;
     active_fast_.store(false, std::memory_order_release);
-    XR_LOG_INFO("相机标定已停止：视角=%llu 输出=%s",
-                static_cast<unsigned long long>(accepted_views_.size()),
+    XR_LOG_INFO("camera calibration stopped: views=%u output=%s",
+                static_cast<unsigned>(accepted_views_.size()),
                 output_dir_.c_str());
   }
 
@@ -187,9 +187,9 @@ class CameraBaseCalibration
       std::lock_guard<std::mutex> lock(mutex_);
       if (static_cast<int>(accepted_views_.size()) < kMinimumCalibrationViews)
       {
-        XR_LOG_WARN("相机标定：至少需要 %d 个视角，当前只有 %llu 个",
+        XR_LOG_WARN("camera calibration: need at least %d views, got %u",
                     kMinimumCalibrationViews,
-                    static_cast<unsigned long long>(accepted_views_.size()));
+                    static_cast<unsigned>(accepted_views_.size()));
         return false;
       }
 
@@ -379,7 +379,7 @@ class CameraBaseCalibration
     }
     catch (const cv::Exception& e)
     {
-      XR_LOG_ERROR("相机标定：detectMarkers 失败：%s", e.what());
+      XR_LOG_ERROR("camera calibration: detectMarkers failed: %s", e.what());
       return false;
     }
 
@@ -428,7 +428,7 @@ class CameraBaseCalibration
     {
       if (!max_views_logged_)
       {
-        XR_LOG_WARN("相机标定：已达到最多存储视角 %d，请执行 cali save 或 cali stop",
+        XR_LOG_WARN("camera calibration: reached max stored views %d, run cali save or cali stop",
                     config_.max_stored_views);
         max_views_logged_ = true;
       }
@@ -473,16 +473,16 @@ class CameraBaseCalibration
     stored.homography_rms = detection.homography_rms;
     stored.sharpness_score = detection.sharpness_score;
 
-    XR_LOG_INFO("相机标定：接受视角 %llu，标记=%d H-rms=%.3f 清晰度=%.1f ts=%llu",
-                static_cast<unsigned long long>(accepted_views_.size()),
-                detection.used_markers, detection.homography_rms,
-                detection.sharpness_score,
-                static_cast<unsigned long long>(snapshot.timestamp_us));
+    XR_LOG_INFO("camera calibration: accepted view %u markers=%d H-rms=%.3f sharpness=%.1f ts_ms=%u",
+                static_cast<unsigned>(accepted_views_.size()),
+                detection.used_markers, static_cast<float>(detection.homography_rms),
+                static_cast<float>(detection.sharpness_score),
+                static_cast<unsigned>(snapshot.timestamp_us / 1000U));
 
     if (!recommended_views_logged_ &&
         static_cast<int>(accepted_views_.size()) >= config_.recommended_views)
     {
-      XR_LOG_INFO("相机标定：已达到建议视角数 %d，可继续移动取样，或执行 cali save",
+      XR_LOG_INFO("camera calibration: reached recommended views %d, keep sampling or run cali save",
                   config_.recommended_views);
       recommended_views_logged_ = true;
     }
@@ -497,7 +497,7 @@ class CameraBaseCalibration
       return;
     }
     unsupported_encoding_logged_ = true;
-    XR_LOG_ERROR("相机标定：当前图像编码暂不支持 encoding=%u",
+    XR_LOG_ERROR("camera calibration: unsupported image encoding=%u",
                  static_cast<unsigned>(CameraInfoV.encoding));
   }
 
@@ -953,9 +953,9 @@ class CameraBaseCalibration
     if (calibration_views.size() >= kMinimumCalibrationViews &&
         calibration_views.size() < input_views.size())
     {
-      XR_LOG_INFO("相机标定：清晰度预筛选保留 %llu/%llu 个视角",
-                  static_cast<unsigned long long>(calibration_views.size()),
-                  static_cast<unsigned long long>(input_views.size()));
+      XR_LOG_INFO("camera calibration: sharpness prefilter kept %u/%u views",
+                  static_cast<unsigned>(calibration_views.size()),
+                  static_cast<unsigned>(input_views.size()));
     }
     else
     {
@@ -974,7 +974,7 @@ class CameraBaseCalibration
     }
     catch (const cv::Exception& e)
     {
-      XR_LOG_ERROR("相机标定：calibrateCamera 失败：%s", e.what());
+      XR_LOG_ERROR("camera calibration: calibrateCamera failed: %s", e.what());
       return false;
     }
 
@@ -999,7 +999,7 @@ class CameraBaseCalibration
       }
       catch (const cv::Exception& e)
       {
-        XR_LOG_WARN("相机标定：剔除离群视角后的标定失败：%s", e.what());
+        XR_LOG_WARN("camera calibration: outlier-filtered calibration failed: %s", e.what());
       }
 
       if (!filtered_camera_matrix.empty())
@@ -1017,7 +1017,7 @@ class CameraBaseCalibration
     std::filesystem::create_directories(output_dir, ec);
     if (ec)
     {
-      XR_LOG_ERROR("相机标定：创建输出目录失败 %s: %s",
+      XR_LOG_ERROR("camera calibration: create output dir failed %s: %s",
                    output_dir.c_str(), ec.message().c_str());
       return false;
     }
@@ -1036,8 +1036,8 @@ class CameraBaseCalibration
 
     output.rms = rms;
     output.yaml_path = yaml_path.string();
-    XR_LOG_PASS("相机标定结果已保存：视角=%llu rms=%.4f yaml=%s",
-                static_cast<unsigned long long>(final_views.size()), rms,
+    XR_LOG_PASS("camera calibration saved: views=%u rms=%.4f yaml=%s",
+                static_cast<unsigned>(final_views.size()), static_cast<float>(rms),
                 output.yaml_path.c_str());
     return true;
   }
@@ -1161,7 +1161,7 @@ class CameraBaseCalibration
     }
     catch (const cv::Exception& e)
     {
-      XR_LOG_WARN("相机标定：写入调试图失败 %s: %s",
+      XR_LOG_WARN("camera calibration: write debug image failed %s: %s",
                   path.string().c_str(), e.what());
     }
   }
