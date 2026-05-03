@@ -202,15 +202,6 @@ class CameraBase
     std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
   };
 
-  /**
-   * @struct SensorSyncCmd
-   * @brief 由同步模块下发给采集端的一次性同步探针命令。
-   */
-  struct SensorSyncCmd
-  {
-    uint8_t reserved{};  ///< 一次性探针触发命令；当前不需要序号或回填字段。
-  };
-
   /// 图像生产者提交一帧后，由 sink 返回下一个可写槽位。
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
@@ -229,10 +220,6 @@ class CameraBase
                 "CameraBase::ImageFrame must be standard layout");
   static_assert(std::is_standard_layout_v<ImuStamped>,
                 "CameraBase::ImuStamped must be standard layout");
-  static_assert(std::is_trivially_copyable_v<SensorSyncCmd>,
-                "CameraBase::SensorSyncCmd must be trivially copyable");
-  static_assert(std::is_standard_layout_v<SensorSyncCmd>,
-                "CameraBase::SensorSyncCmd must be standard layout");
   static_assert(alignof(ImageFrame) >= image_alignment,
                 "CameraBase::ImageFrame alignment is too small");
   static_assert(offsetof(ImageFrame, data) % image_alignment == 0,

@@ -18,8 +18,6 @@
   - 供具体相机模块直接写入，再交给后续共享图像发布环节
 - `CameraBase<Info>::ImuStamped`
   - 最终对下游发布的同步后 IMU 数据
-- `CameraBase<Info>::SensorSyncCmd`
-  - 同步模块下发给采集端的一次性同步探针命令
 - 图像 sink API
   - `RegisterImageSink(...)`
   - `ImageSinkReady()`
@@ -51,9 +49,8 @@
   IMU 域时间戳拿来做跨域绝对值匹配。
 - 跨域同步关系应先通过专门的同步策略锁定，再在 IMU 域内使用 `offset`
   推导最终样本。
-- `SensorSyncCmd` 是一次性同步探针命令。
-- 当前约定下，采集端只需要临时改变一次图像发布节拍；同步模块通过图像
-  `ImageFrame::timestamp_us` 的周期变化识别探针帧，不依赖显式 `seq/id` 回填。
+- 相机触发同步命令不属于 `CameraBase`。实机链路应使用 `CameraSync::SyncCommand`
+  作为跨端 payload，并通过专门的同步 topic 下发。
 
 ## 备注
 
