@@ -1,6 +1,6 @@
 # CameraBase
 
-`CameraBase` 是当前这条 Webots/Linux 自瞄链路里的“相机前半段 ABI”。
+`CameraBase` 是当前 Webots/Linux 自瞄链路里的相机 ABI 基线。
 
 它本身不实现具体驱动，只负责定义：
 
@@ -42,11 +42,13 @@
 ## 同步相关约定
 
 - 原始 `gyro / accl / quat` 的采样时刻由发布端通过 Topic timestamp 携带；
-  `CameraBase` 不再为三路原始传感器定义额外 wrapper。
+  `CameraBase` 不再为三路原始传感器定义额外 wrapper，也不保留 `seq/id`。
 - `ImuStamped / ImageFrame` 的 `timestamp_us` 统一使用
   `LibXR::MicrosecondTimestamp` 表达，ABI 仍保持 64 位微秒时间戳。
-- 原始传感器时间戳只保证在 IMU 数据域内部可比较，不能直接把图像域时间戳和
-  IMU 域时间戳拿来做跨域最近邻匹配。
+- `ImageFrame::timestamp_us` 是图像传感器侧时间戳；同步后的
+  `ImuStamped::timestamp_us` 使用对应图像的传感器侧时间戳。
+- 原始 IMU 时间戳只保证在 IMU 数据域内部可比较，不能直接把图像域时间戳和
+  IMU 域时间戳拿来做跨域绝对值匹配。
 - 跨域同步关系应先通过专门的同步策略锁定，再在 IMU 域内使用 `offset`
   推导最终样本。
 - `SensorSyncCmd` 是一次性同步探针命令。

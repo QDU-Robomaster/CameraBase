@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 相机基础类型与像素编码定义 / Base camera types & encodings
+module_description: 相机基础类型、像素编码和图像/IMU 同步 ABI
 constructor_args: []
 template_args: []
 required_hardware: []
@@ -185,7 +185,7 @@ class CameraBase
    */
   struct alignas(image_alignment) ImageFrame
   {
-    LibXR::MicrosecondTimestamp timestamp_us;  ///< 图像时间戳，单位微秒。
+    LibXR::MicrosecondTimestamp timestamp_us;  ///< 图像传感器侧时间戳，单位微秒。
     alignas(image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节负载。
   };
 
@@ -195,7 +195,7 @@ class CameraBase
    */
   struct ImuStamped
   {
-    LibXR::MicrosecondTimestamp timestamp_us;  ///< IMU/位姿时间戳，单位微秒。
+    LibXR::MicrosecondTimestamp timestamp_us;  ///< 对应图像的传感器侧时间戳，单位微秒。
     std::array<float, 4> rotation_wxyz;  ///< 姿态四元数，顺序为 wxyz。
     std::array<float, 3> translation_xyz;  ///< 相机平移，单位米。
     std::array<float, 3> angular_velocity_xyz;  ///< 角速度，单位 rad/s。
@@ -208,10 +208,10 @@ class CameraBase
    */
   struct SensorSyncCmd
   {
-    uint8_t reserved{};  ///< 一次性探针触发命令，负载当前保留未用。
+    uint8_t reserved{};  ///< 一次性探针触发命令；当前不需要序号或回填字段。
   };
 
-  /// 图像生产者提交一帧后，用于切换到下一个可写槽位的回调。
+  /// 图像生产者提交一帧后，由 sink 返回下一个可写槽位。
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
@@ -264,8 +264,10 @@ class CameraBase
   std::string_view ImuTopicNameView() const { return imu_topic_name_; }
   const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
 
+  /// 发布已经由同步模块对齐完成的 IMU 包。
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
+  /// 注册唯一图像 sink；具体相机只写入当前租借槽位，不拥有后级队列。
   bool RegisterImageSink(ImageFrame* initial_image, ImageCommitCallback commit_callback)
   {
     if (initial_image == nullptr || commit_callback.Empty())
