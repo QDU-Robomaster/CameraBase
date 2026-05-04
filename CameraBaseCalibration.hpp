@@ -36,19 +36,23 @@ class CameraBaseCalibration
 {
  public:
   /// GShang 生成器使用 ArUco original 字典中的 5-bit 有效码元。
-  static constexpr int kGShangDictionaryBits = 5;
+  static constexpr int gshang_dictionary_bits = 5;
   /// 单个 marker 的总码元宽度：5-bit 有效区加一圈白边。
-  static constexpr int kGShangMarkerCells = kGShangDictionaryBits + 2;
+  static constexpr int gshang_marker_cells = gshang_dictionary_bits + 2;
   /// 单个棋盘方格的总码元宽度：marker 外再加棋盘留边。
-  static constexpr int kGShangSquareCells = kGShangDictionaryBits + 4;
+  static constexpr int gshang_square_cells = gshang_dictionary_bits + 4;
   /// OpenCV 标定求解前允许保存的最少有效视角数。
-  static constexpr int kMinimumCalibrationViews = 8;
+  static constexpr int minimum_calibration_views = 8;
   /// 经验建议视角数；达到后只提示，不自动停止采样。
-  static constexpr int kDefaultRecommendedViews = 120;
+  static constexpr int default_recommended_views = 120;
   /// 默认最多保留的已接受视角，防止长时间在线采样占用过多内存和磁盘。
-  static constexpr int kDefaultMaxStoredViews = 300;
+  static constexpr int default_max_stored_views = 300;
+  /// 默认 marker 可见比例门槛；实际最少 marker 数按当前板型在 Start() 后派生。
+  static constexpr double default_min_marker_ratio = 2.0 / 3.0;
+  /// 极小标定板仍尽量要求至少 4 个 marker；若板上 marker 总数不足则取总数。
+  static constexpr int minimum_required_markers = 4;
   /// 当前 CameraInfoV 的像素编码是否能被本标定器零拷贝封装为 cv::Mat。
-  static constexpr bool kSupportsImageEncoding =
+  static constexpr bool supports_image_encoding =
       CameraInfoV.encoding == CameraTypes::Encoding::BGR8 ||
       CameraInfoV.encoding == CameraTypes::Encoding::RGB8 ||
       CameraInfoV.encoding == CameraTypes::Encoding::BGRA8 ||
@@ -69,12 +73,12 @@ class CameraBaseCalibration
     int cols = 8;
     /// GShang 工具中的标定板行数，也就是棋盘方格行数。
     int rows = 6;
-    /// 单帧至少需要识别到的有效 marker 数，低于该值不进入采样池。
-    int min_markers = 12;
+    /// 单帧至少需要识别到的有效 marker 比例，实际 marker 数按当前板型派生。
+    double min_marker_ratio = default_min_marker_ratio;
     /// 建议采满的视角数；达到后提示操作手可以保存。
-    int recommended_views = kDefaultRecommendedViews;
-    /// 内存中最多保留的已接受视角数量。
-    int max_stored_views = kDefaultMaxStoredViews;
+    int recommended_views = default_recommended_views;
+    /// 内存中最多保留的已接受视角数量，同时限制本轮写出的 debug 图数量。
+    int max_stored_views = default_max_stored_views;
     /// 图像处理抽帧间隔；所有帧仍被吞掉，但只每 N 帧跑一次检测。
     int process_stride = 3;
     /// 两个已接受视角之间的最小时间间隔，避免一段静止画面刷满样本。
@@ -123,7 +127,7 @@ class CameraBaseCalibration
       return false;
     }
 
-    if constexpr (!kSupportsImageEncoding)
+    if constexpr (!supports_image_encoding)
     {
       XR_LOG_ERROR("camera calibration: unsupported image encoding=%u",
                    static_cast<unsigned>(CameraInfoV.encoding));
@@ -151,18 +155,21 @@ class CameraBaseCalibration
     }
 
     accepted_views_.clear();
+    accepted_views_.shrink_to_fit();
+    accepted_views_.reserve(static_cast<std::size_t>(config_.max_stored_views));
     ResetCountersLocked();
     // active_fast_ 是 CommitImage() 热路径的无锁快速判断，active_ 是锁内权威状态。
     active_ = true;
     active_fast_.store(true, std::memory_order_release);
 
     XR_LOG_INFO("camera calibration started: marker=%.3fmm board=%dx%d "
-                "square=%.3fmm min_markers=%d recommended_views=%d "
-                "max_views=%d output=%s",
+                "square=%.3fmm min_marker_ratio=%.2f required_markers=%d "
+                "recommended_views=%d max_views=%d output=%s",
                 static_cast<float>(config_.marker_mm), config_.cols, config_.rows,
-                static_cast<float>(SquareMm(config_)), config_.min_markers,
-                config_.recommended_views, config_.max_stored_views,
-                output_dir_.c_str());
+                static_cast<float>(SquareMm(config_)),
+                static_cast<float>(config_.min_marker_ratio),
+                RequiredMarkerCount(config_), config_.recommended_views,
+                config_.max_stored_views, output_dir_.c_str());
     return true;
   }
 
@@ -186,11 +193,11 @@ class CameraBaseCalibration
     FrameSnapshot snapshot;
     // PrepareFrame() 在锁内决定发布/吞帧/处理，并复制检测所需的不可变快照。
     const FrameAction action = PrepareFrame(data, timestamp_us, snapshot);
-    if (action == FrameAction::kPublish)
+    if (action == FrameAction::PUBLISH)
     {
       return false;
     }
-    if (action == FrameAction::kSwallow)
+    if (action == FrameAction::SWALLOW)
     {
       return true;
     }
@@ -244,10 +251,10 @@ class CameraBaseCalibration
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (static_cast<int>(accepted_views_.size()) < kMinimumCalibrationViews)
+      if (static_cast<int>(accepted_views_.size()) < minimum_calibration_views)
       {
         XR_LOG_WARN("camera calibration: need at least %d views, got %u",
-                    kMinimumCalibrationViews,
+                    minimum_calibration_views,
                     static_cast<unsigned>(accepted_views_.size()));
         return false;
       }
@@ -290,7 +297,7 @@ class CameraBaseCalibration
        << " 建议=" << config_.recommended_views
        << " 上限=" << config_.max_stored_views
        << " 可保存="
-       << (accepted_views_.size() >= kMinimumCalibrationViews ? 1 : 0)
+       << (accepted_views_.size() >= minimum_calibration_views ? 1 : 0)
        << " 已处理=" << processed_frames_
        << " 已检测=" << detected_frames_
        << " 模糊拒绝=" << sharpness_rejected_frames_
@@ -299,6 +306,8 @@ class CameraBaseCalibration
        << " 标定板=" << config_.cols << "x" << config_.rows
        << " 标记mm=" << config_.marker_mm
        << " 方格mm=" << SquareMm(config_)
+       << " 标记覆盖=" << config_.min_marker_ratio
+       << " 最少标记=" << RequiredMarkerCount(config_)
        << " 最佳清晰度=" << best_sharpness_score_
        << " 输出=" << output_dir_;
     if (last_rms_ >= 0.0)
@@ -431,18 +440,18 @@ class CameraBaseCalibration
   enum class FrameAction
   {
     /// 标定未激活，交还给 CameraBase 正常发布。
-    kPublish,
+    PUBLISH,
     /// 标定激活但本帧不做检测，吞掉帧以切断下游图像发布。
-    kSwallow,
+    SWALLOW,
     /// 标定激活且当前帧需要进入 OpenCV 检测。
-    kProcess,
+    PROCESS,
   };
 
   /**
    * @brief 根据命令参数生成完整配置。
    *
-   * marker_count 为 GShang 布局中实际存在的 ArUco marker 数；min_markers
-   * 取约三分之二，兼顾遮挡容忍和误检防护。
+   * marker_count 为 GShang 布局中实际存在的 ArUco marker 数；min_marker_ratio
+   * 保留为比例配置，具体最少 marker 数由 RequiredMarkerCount() 按当前板型派生。
    */
   static Config MakeConfig(double marker_mm, int cols, int rows)
   {
@@ -450,10 +459,30 @@ class CameraBaseCalibration
     config.marker_mm = marker_mm;
     config.cols = cols;
     config.rows = rows;
-
-    const int marker_count = (rows * cols) / 2;
-    config.min_markers = std::max(4, std::min(marker_count, (marker_count * 2 + 2) / 3));
     return config;
+  }
+
+  /**
+   * @brief 计算当前 GShang ChArUco 标定板上的 marker 总数。
+   */
+  static int MarkerCount(const Config& config)
+  {
+    return (config.rows * config.cols) / 2;
+  }
+
+  /**
+   * @brief 按比例阈值派生当前板型的最少可见 marker 数。
+   *
+   * 比例阈值比固定数量更适合 4x4、8x6、11x8 等不同尺寸标定板；下限用于避免小板
+   * 因比例计算过低而接受几何约束太弱的帧。
+   */
+  static int RequiredMarkerCount(const Config& config)
+  {
+    const int marker_count = MarkerCount(config);
+    const int by_ratio = static_cast<int>(
+        std::ceil(static_cast<double>(marker_count) * config.min_marker_ratio));
+    return std::max(1, std::min(marker_count,
+                                std::max(minimum_required_markers, by_ratio)));
   }
 
   /**
@@ -491,7 +520,7 @@ class CameraBaseCalibration
     std::lock_guard<std::mutex> lock(mutex_);
     if (!active_)
     {
-      return FrameAction::kPublish;
+      return FrameAction::PUBLISH;
     }
 
     ++swallowed_frames_;
@@ -500,7 +529,7 @@ class CameraBaseCalibration
     if (data == nullptr || config_.process_stride <= 0 ||
         (raw_frame_index_ % static_cast<uint64_t>(config_.process_stride)) != 0)
     {
-      return FrameAction::kSwallow;
+      return FrameAction::SWALLOW;
     }
 
     ++processed_frames_;
@@ -511,7 +540,7 @@ class CameraBaseCalibration
     snapshot.detector_params = detector_params_;
     snapshot.frame_index = raw_frame_index_;
     snapshot.timestamp_us = timestamp_us;
-    return FrameAction::kProcess;
+    return FrameAction::PROCESS;
   }
 
   /**
@@ -551,7 +580,7 @@ class CameraBaseCalibration
     // 单应性 RMS 是快速几何门槛，能在 calibrateCamera 前拒绝明显错配的角点集。
     detection.homography_rms =
         HomographyRms(detection.object_points, detection.image_points);
-    if (detection.used_markers < snapshot.config.min_markers ||
+    if (detection.used_markers < RequiredMarkerCount(snapshot.config) ||
         detection.homography_rms > snapshot.config.max_homography_rms)
     {
       return false;
@@ -676,8 +705,8 @@ class CameraBaseCalibration
    */
   static double SquareMm(const Config& config)
   {
-    return config.marker_mm * static_cast<double>(kGShangSquareCells) /
-           static_cast<double>(kGShangMarkerCells);
+    return config.marker_mm * static_cast<double>(gshang_square_cells) /
+           static_cast<double>(gshang_marker_cells);
   }
 
   /**
@@ -772,8 +801,8 @@ class CameraBaseCalibration
    */
   static BoardMap MakeGShangMarkerMap(const Config& config)
   {
-    const double cell_mm = config.marker_mm / static_cast<double>(kGShangMarkerCells);
-    const double square_mm = cell_mm * static_cast<double>(kGShangSquareCells);
+    const double cell_mm = config.marker_mm / static_cast<double>(gshang_marker_cells);
+    const double square_mm = cell_mm * static_cast<double>(gshang_square_cells);
     const double marker_offset_mm = cell_mm;
 
     BoardMap map;
@@ -1223,7 +1252,7 @@ class CameraBaseCalibration
   {
     // 先用清晰度过滤处理运动模糊；若过滤后视角不足，则回退到原始输入避免误删过多。
     std::vector<View> calibration_views = FilterBySharpness(input_views, config);
-    if (calibration_views.size() >= kMinimumCalibrationViews &&
+    if (calibration_views.size() >= minimum_calibration_views &&
         calibration_views.size() < input_views.size())
     {
       XR_LOG_INFO("camera calibration: sharpness prefilter kept %u/%u views",
@@ -1258,7 +1287,7 @@ class CameraBaseCalibration
 
     const std::vector<View> filtered =
         FilterByRms(calibration_views, final_per_view_rms, config.max_reprojection_rms);
-    if (filtered.size() >= kMinimumCalibrationViews &&
+    if (filtered.size() >= minimum_calibration_views &&
         filtered.size() < calibration_views.size())
     {
       cv::Mat filtered_camera_matrix;
@@ -1489,7 +1518,7 @@ class CameraBaseCalibration
   cv::Ptr<cv::aruco::Dictionary> dictionary_{};
   /// 当前 ArUco 检测参数实例。
   cv::Ptr<cv::aruco::DetectorParameters> detector_params_{};
-  /// 已通过在线过滤并等待保存求解的视角集合。
+  /// 已通过在线过滤并等待保存求解的视角集合，数量不超过 config_.max_stored_views。
   std::vector<View> accepted_views_{};
 
   /// 本轮标定输出根目录。
