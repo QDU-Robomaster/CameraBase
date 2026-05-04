@@ -45,8 +45,6 @@ class CameraBaseCalibration
   static constexpr int minimum_calibration_views = 8;
   /// 经验建议视角数；达到后只提示，不自动停止采样。
   static constexpr int default_recommended_views = 120;
-  /// 默认最多保留的已接受视角，防止长时间在线采样占用过多内存和磁盘。
-  static constexpr int default_max_stored_views = 300;
   /// 默认 marker 可见比例门槛；实际最少 marker 数按当前板型在 Start() 后派生。
   static constexpr double default_min_marker_ratio = 2.0 / 3.0;
   /// 极小标定板仍尽量要求至少 4 个 marker；若板上 marker 总数不足则取总数。
@@ -77,8 +75,6 @@ class CameraBaseCalibration
     double min_marker_ratio = default_min_marker_ratio;
     /// 建议采满的视角数；达到后提示操作手可以保存。
     int recommended_views = default_recommended_views;
-    /// 内存中最多保留的已接受视角数量，同时限制本轮写出的 debug 图数量。
-    int max_stored_views = default_max_stored_views;
     /// 图像处理抽帧间隔；所有帧仍被吞掉，但只每 N 帧跑一次检测。
     int process_stride = 3;
     /// 两个已接受视角之间的最小时间间隔，避免一段静止画面刷满样本。
@@ -156,7 +152,6 @@ class CameraBaseCalibration
 
     accepted_views_.clear();
     accepted_views_.shrink_to_fit();
-    accepted_views_.reserve(static_cast<std::size_t>(config_.max_stored_views));
     ResetCountersLocked();
     // active_fast_ 是 CommitImage() 热路径的无锁快速判断，active_ 是锁内权威状态。
     active_ = true;
@@ -164,12 +159,12 @@ class CameraBaseCalibration
 
     XR_LOG_INFO("camera calibration started: marker=%.3fmm board=%dx%d "
                 "square=%.3fmm min_marker_ratio=%.2f required_markers=%d "
-                "recommended_views=%d max_views=%d output=%s",
+                "recommended_views=%d output=%s",
                 static_cast<float>(config_.marker_mm), config_.cols, config_.rows,
                 static_cast<float>(SquareMm(config_)),
                 static_cast<float>(config_.min_marker_ratio),
                 RequiredMarkerCount(config_), config_.recommended_views,
-                config_.max_stored_views, output_dir_.c_str());
+                output_dir_.c_str());
     return true;
   }
 
@@ -295,7 +290,6 @@ class CameraBaseCalibration
        << " 完成=" << (finished_ ? 1 : 0)
        << " 视角=" << accepted_views_.size()
        << " 建议=" << config_.recommended_views
-       << " 上限=" << config_.max_stored_views
        << " 可保存="
        << (accepted_views_.size() >= minimum_calibration_views ? 1 : 0)
        << " 已处理=" << processed_frames_
@@ -502,7 +496,6 @@ class CameraBaseCalibration
     finished_ = false;
     unsupported_encoding_logged_ = false;
     recommended_views_logged_ = false;
-    max_views_logged_ = false;
     best_sharpness_score_ = 0.0;
     sharpness_rejected_frames_ = 0;
     duplicate_rejected_frames_ = 0;
@@ -611,18 +604,6 @@ class CameraBaseCalibration
         snapshot.timestamp_us - last_accept_timestamp_us_ <
             config_.min_accept_interval_us)
     {
-      return false;
-    }
-
-    // 达到上限后保持吞帧但不再增长采样池，等待操作手 save/stop。
-    if (static_cast<int>(accepted_views_.size()) >= config_.max_stored_views)
-    {
-      if (!max_views_logged_)
-      {
-        XR_LOG_WARN("camera calibration: reached max stored views %d, run cali save or cali stop",
-                    config_.max_stored_views);
-        max_views_logged_ = true;
-      }
       return false;
     }
 
@@ -1507,8 +1488,6 @@ class CameraBaseCalibration
   bool unsupported_encoding_logged_{false};
   /// 达到建议视角数的提示是否已经记录过。
   bool recommended_views_logged_{false};
-  /// 达到最大存储视角数的提示是否已经记录过。
-  bool max_views_logged_{false};
 
   /// 当前标定轮次配置。
   Config config_{};
@@ -1518,7 +1497,7 @@ class CameraBaseCalibration
   cv::Ptr<cv::aruco::Dictionary> dictionary_{};
   /// 当前 ArUco 检测参数实例。
   cv::Ptr<cv::aruco::DetectorParameters> detector_params_{};
-  /// 已通过在线过滤并等待保存求解的视角集合，数量不超过 config_.max_stored_views。
+  /// 已通过在线过滤并等待保存求解的点集；完整 debug 图在接受时立即写入磁盘。
   std::vector<View> accepted_views_{};
 
   /// 本轮标定输出根目录。
