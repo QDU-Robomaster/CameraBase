@@ -20,6 +20,7 @@ depends: []
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -160,6 +161,9 @@ class CameraTypes
   }
 };
 
+#include "CameraBaseIntrinsicSanity.hpp"
+#include "CameraBaseCalibration.hpp"
+
 /**
  * @class CameraBase
  * @brief 编译期绑定相机静态信息的基类。
@@ -216,6 +220,8 @@ class CameraBase
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
   static_assert(image_bytes > 0, "CameraBase requires non-zero image bytes");
+  static_assert(CameraBaseIntrinsicSanity::CameraInfoReasonable(camera_info),
+                "CameraBase compile-time CameraInfo intrinsics are unreasonable");
   static_assert(std::is_standard_layout_v<ImageFrame>,
                 "CameraBase::ImageFrame must be standard layout");
   static_assert(std::is_standard_layout_v<ImuStamped>,
@@ -287,6 +293,12 @@ class CameraBase
       return false;
     }
 
+    if (calibration_.ProcessFrame(writable_image_->data.data(),
+                                  static_cast<uint64_t>(writable_image_->timestamp_us)))
+    {
+      return true;
+    }
+
     ImageFrame* next_image = nullptr;
     image_commit_callback_.Run(false, next_image);
     if (next_image == nullptr)
@@ -300,16 +312,77 @@ class CameraBase
     return true;
   }
 
-  // 调试/bring-up 阶段的临时命令入口。
+  static bool ParsePositiveIntArg(const char* text, int& value)
+  {
+    if (text == nullptr || *text == '\0')
+    {
+      return false;
+    }
+
+    char* end = nullptr;
+    const long parsed = std::strtol(text, &end, 10);
+    if (end == text || *end != '\0' || parsed <= 0 ||
+        parsed > static_cast<long>(std::numeric_limits<int>::max()))
+    {
+      return false;
+    }
+
+    value = static_cast<int>(parsed);
+    return true;
+  }
+
+  // 调试/bring-up 阶段的命令入口。
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
     {
       LibXR::STDIO::Printf<"Camera: %s\n\n">(self->name_.c_str());
-      LibXR::STDIO::Printf<"Usage:\r\n">();
-      LibXR::STDIO::Printf<"  set_exposure <exposure>\r\n">();
-      LibXR::STDIO::Printf<"  set_gain <gain>\r\n">();
+      LibXR::STDIO::Printf<"用法:\r\n">();
+      LibXR::STDIO::Printf<"  set_exposure <曝光>\r\n">();
+      LibXR::STDIO::Printf<"  set_gain <增益>\r\n">();
+      LibXR::STDIO::Printf<"  cali <标记尺寸mm> <列数> <行数>  例：cali 25mm 8 6\r\n">();
+      LibXR::STDIO::Printf<"  cali status\r\n">();
+      LibXR::STDIO::Printf<"  cali save\r\n">();
+      LibXR::STDIO::Printf<"  cali stop\r\n">();
       return 0;
+    }
+    else if (strcmp(argv[1], "cali") == 0)
+    {
+      if (argc == 5)
+      {
+        int cols = 0;
+        int rows = 0;
+        if (!ParsePositiveIntArg(argv[3], cols) ||
+            !ParsePositiveIntArg(argv[4], rows))
+        {
+          LibXR::STDIO::Printf<"标定板列数和行数必须是正整数：cols=%s rows=%s\r\n">(
+              argv[3], argv[4]);
+          return -1;
+        }
+        return self->calibration_.Start(argv[2], cols, rows, self->name_) ? 0 : -1;
+      }
+
+      if (argc == 2 || (argc == 3 && strcmp(argv[2], "status") == 0))
+      {
+        const std::string status = self->calibration_.StatusString();
+        LibXR::STDIO::Printf<"%s\r\n">(status.c_str());
+        return 0;
+      }
+
+      if (argc == 3 && strcmp(argv[2], "save") == 0)
+      {
+        if (self->calibration_.SaveAndStop())
+        {
+          std::exit(EXIT_SUCCESS);
+        }
+        return -1;
+      }
+
+      if (argc == 3 && strcmp(argv[2], "stop") == 0)
+      {
+        self->calibration_.Stop();
+        return 0;
+      }
     }
     else if (argc == 3)
     {
@@ -325,7 +398,7 @@ class CameraBase
       }
     }
 
-    LibXR::STDIO::Printf<"Unknown command: %s\n">(argv[1]);
+    LibXR::STDIO::Printf<"未知命令：%s\n">(argv[1]);
     return -1;
   }
 
@@ -337,4 +410,5 @@ class CameraBase
   LibXR::Topic imu_topic_;
   ImageFrame* writable_image_{nullptr};
   ImageCommitCallback image_commit_callback_{};
+  CameraBaseCalibration<CameraInfoV> calibration_{};
 };
