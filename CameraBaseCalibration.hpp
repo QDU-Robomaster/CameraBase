@@ -1314,25 +1314,31 @@ class CameraBaseCalibration
 
     std::ostringstream out;
     out << std::setprecision(10);
-    out << "===== calibration quality begin =====\n";
-    out << "quality_ok: " << (quality_ok ? 1 : 0) << "\n";
-    out << "views: " << coverage.views << "\n";
-    out << "reprojection_ok: " << (reprojection_ok ? 1 : 0) << "\n";
-    out << "max_reprojection_rms: " << max_reprojection_rms << "\n";
-    out << "global_rms: " << global_rms << "\n";
-    out << "per_view_rms_p50: " << per_view_p50 << "\n";
-    out << "per_view_rms_p95: " << per_view_p95 << "\n";
-    out << "per_view_rms_max: " << per_view_max << "\n";
-    out << "coverage_center_x: [" << coverage.center_x_min << ", "
+    out << "===== 标定质量报告开始 =====\n";
+    out << "质量总判定(quality_ok): "
+        << CameraBaseIntrinsicSanity::PassFail(quality_ok) << "\n";
+    out << "最终视角数(views): " << coverage.views << "\n";
+    out << "重投影判定(reprojection_ok): "
+        << CameraBaseIntrinsicSanity::PassFail(reprojection_ok) << "\n";
+    out << "重投影阈值(max_reprojection_rms): "
+        << max_reprojection_rms << " px\n";
+    out << "全局重投影 RMS(global_rms): " << global_rms << " px\n";
+    out << "单视角重投影 RMS P50(per_view_rms_p50): "
+        << per_view_p50 << " px\n";
+    out << "单视角重投影 RMS P95(per_view_rms_p95): "
+        << per_view_p95 << " px\n";
+    out << "单视角重投影 RMS 最大值(per_view_rms_max): "
+        << per_view_max << " px\n";
+    out << "样本中心 X 覆盖(coverage_center_x): [" << coverage.center_x_min << ", "
         << coverage.center_x_max << "] span=" << coverage.center_span_x << "\n";
-    out << "coverage_center_y: [" << coverage.center_y_min << ", "
+    out << "样本中心 Y 覆盖(coverage_center_y): [" << coverage.center_y_min << ", "
         << coverage.center_y_max << "] span=" << coverage.center_span_y << "\n";
-    out << "coverage_scale: [" << coverage.scale_min << ", "
+    out << "样本尺度覆盖(coverage_scale): [" << coverage.scale_min << ", "
         << coverage.scale_max << "] ratio=" << coverage.scale_ratio << "\n";
-    out << "coverage_angle_deg: [" << coverage.angle_min_deg << ", "
+    out << "样本平面角覆盖(coverage_angle_deg): [" << coverage.angle_min_deg << ", "
         << coverage.angle_max_deg << "] span=" << coverage.angle_span_deg << "\n";
     out << CameraBaseIntrinsicSanity::FormatReport(intrinsics);
-    out << "===== calibration quality end =====\n";
+    out << "===== 标定质量报告结束 =====\n";
     return out.str();
   }
 

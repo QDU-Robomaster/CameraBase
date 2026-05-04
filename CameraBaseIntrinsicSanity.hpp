@@ -70,6 +70,11 @@ class CameraBaseIntrinsicSanity
     return value == value && value > -finite_guard && value < finite_guard;
   }
 
+  static constexpr const char* PassFail(bool ok)
+  {
+    return ok ? "通过" : "失败";
+  }
+
   static constexpr bool MatrixShapeReasonable(const std::array<double, 9>& k)
   {
     return IsFiniteLike(k[0]) && IsFiniteLike(k[1]) &&
@@ -186,22 +191,27 @@ class CameraBaseIntrinsicSanity
   {
     std::ostringstream out;
     out << std::setprecision(10);
-    out << "intrinsics_ok: " << (metrics.all_ok ? 1 : 0) << "\n";
-    out << "matrix_shape_ok: " << (metrics.matrix_shape_ok ? 1 : 0) << "\n";
-    out << "focal_ok: " << (metrics.focal_ok ? 1 : 0) << "\n";
-    out << "focal_ratio_ok: " << (metrics.focal_ratio_ok ? 1 : 0) << "\n";
-    out << "principal_point_ok: "
-        << (metrics.principal_point_ok ? 1 : 0) << "\n";
-    out << "distortion_ok: " << (metrics.distortion_ok ? 1 : 0) << "\n";
-    out << "fx: " << metrics.fx << "\n";
-    out << "fy: " << metrics.fy << "\n";
-    out << "cx: " << metrics.cx << "\n";
-    out << "cy: " << metrics.cy << "\n";
-    out << "fx_fy_ratio: " << metrics.fx_fy_ratio << "\n";
-    out << "focal_to_image: " << metrics.focal_to_image << "\n";
-    out << "principal_dx_norm: " << metrics.principal_dx_norm << "\n";
-    out << "principal_dy_norm: " << metrics.principal_dy_norm << "\n";
-    out << "max_abs_distortion: "
+    out << "内参判定(intrinsics_ok): " << PassFail(metrics.all_ok) << "\n";
+    out << "内参矩阵形状(matrix_shape_ok): "
+        << PassFail(metrics.matrix_shape_ok) << "\n";
+    out << "焦距量级(focal_ok): " << PassFail(metrics.focal_ok) << "\n";
+    out << "焦距比例(focal_ratio_ok): "
+        << PassFail(metrics.focal_ratio_ok) << "\n";
+    out << "主点范围(principal_point_ok): "
+        << PassFail(metrics.principal_point_ok) << "\n";
+    out << "畸变系数(distortion_ok): "
+        << PassFail(metrics.distortion_ok) << "\n";
+    out << "焦距 fx(fx): " << metrics.fx << "\n";
+    out << "焦距 fy(fy): " << metrics.fy << "\n";
+    out << "主点 cx(cx): " << metrics.cx << "\n";
+    out << "主点 cy(cy): " << metrics.cy << "\n";
+    out << "焦距比例 fx/fy(fx_fy_ratio): " << metrics.fx_fy_ratio << "\n";
+    out << "焦距/图像长边(focal_to_image): " << metrics.focal_to_image << "\n";
+    out << "主点 x 偏移归一化(principal_dx_norm): "
+        << metrics.principal_dx_norm << "\n";
+    out << "主点 y 偏移归一化(principal_dy_norm): "
+        << metrics.principal_dy_norm << "\n";
+    out << "最大畸变系数绝对值(max_abs_distortion): "
         << metrics.max_abs_distortion_value << "\n";
     return out.str();
   }
