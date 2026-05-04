@@ -649,7 +649,7 @@ class CameraBaseCalibration
     stored.homography_rms = detection.homography_rms;
     stored.sharpness_score = detection.sharpness_score;
 
-    XR_LOG_INFO("camera calibration: accepted=%u frames=%u processed=%u "
+    XR_LOG_PASS("camera calibration: accepted=%u frames=%u processed=%u "
                 "detected=%u markers=%d H-rms=%.3f sharpness=%.1f ts_ms=%u",
                 static_cast<unsigned>(accepted_views_.size()),
                 static_cast<unsigned>(swallowed_frames_),
