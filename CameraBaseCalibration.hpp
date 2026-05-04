@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -41,8 +42,8 @@ class CameraBaseCalibration
   static constexpr int gshang_marker_cells = gshang_dictionary_bits + 2;
   /// 单个棋盘方格的总码元宽度：marker 外再加棋盘留边。
   static constexpr int gshang_square_cells = gshang_dictionary_bits + 4;
-  /// OpenCV 标定求解前允许保存的最少有效视角数。
-  static constexpr int minimum_calibration_views = 8;
+  /// 保存阶段二次过滤时保留的 OpenCV 求解视角下限。
+  static constexpr int solver_view_floor = 8;
   /// 经验建议视角数；达到后只提示，不自动停止采样。
   static constexpr int default_recommended_views = 120;
   /// 默认 marker 可见比例门槛；实际最少 marker 数按当前板型在 Start() 后派生。
@@ -236,7 +237,7 @@ class CameraBaseCalibration
   /**
    * @brief 停止采样、运行 OpenCV 标定并写出 YAML/CSV/debug 摘要。
    *
-   * @return true 表示数值求解和文件输出完成；false 表示视角不足或 OpenCV 求解失败。
+   * @return true 表示数值求解和文件输出完成；false 表示 OpenCV 求解失败。
    */
   bool SaveAndStop()
   {
@@ -246,14 +247,6 @@ class CameraBaseCalibration
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (static_cast<int>(accepted_views_.size()) < minimum_calibration_views)
-      {
-        XR_LOG_WARN("camera calibration: need at least %d views, got %u",
-                    minimum_calibration_views,
-                    static_cast<unsigned>(accepted_views_.size()));
-        return false;
-      }
-
       // 保存命令会结束本次标定。即使数值求解失败，也恢复图像发布，
       // 操作手可以调整姿态后重新开始一轮。
       active_ = false;
@@ -270,10 +263,13 @@ class CameraBaseCalibration
       return false;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    finished_ = true;
-    last_rms_ = output.rms;
-    last_saved_yaml_ = output.yaml_path;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      finished_ = true;
+      last_rms_ = output.rms;
+      last_saved_yaml_ = output.yaml_path;
+    }
+    PrintXRobotYamlSnippet(output.xrobot_yaml_snippet);
     return true;
   }
 
@@ -290,8 +286,6 @@ class CameraBaseCalibration
        << " 完成=" << (finished_ ? 1 : 0)
        << " 视角=" << accepted_views_.size()
        << " 建议=" << config_.recommended_views
-       << " 可保存="
-       << (accepted_views_.size() >= minimum_calibration_views ? 1 : 0)
        << " 已处理=" << processed_frames_
        << " 已检测=" << detected_frames_
        << " 模糊拒绝=" << sharpness_rejected_frames_
@@ -428,6 +422,8 @@ class CameraBaseCalibration
     double rms = -1.0;
     /// 写出的 calibration.yml 路径。
     std::string yaml_path;
+    /// 可直接粘贴到 xrobot.yaml 的 CameraInfo constexpr 片段。
+    std::string xrobot_yaml_snippet;
   };
 
   /// PrepareFrame() 对当前帧给出的发布路径决策。
@@ -648,9 +644,13 @@ class CameraBaseCalibration
     stored.homography_rms = detection.homography_rms;
     stored.sharpness_score = detection.sharpness_score;
 
-    XR_LOG_INFO("camera calibration: accepted view %u markers=%d H-rms=%.3f sharpness=%.1f ts_ms=%u",
+    XR_LOG_INFO("camera calibration: accepted=%u frames=%u processed=%u "
+                "detected=%u markers=%d H-rms=%.3f sharpness=%.1f ts_ms=%u",
                 static_cast<unsigned>(accepted_views_.size()),
-                detection.used_markers, static_cast<float>(detection.homography_rms),
+                static_cast<unsigned>(swallowed_frames_),
+                static_cast<unsigned>(processed_frames_),
+                static_cast<unsigned>(detected_frames_), detection.used_markers,
+                static_cast<float>(detection.homography_rms),
                 static_cast<float>(detection.sharpness_score),
                 static_cast<unsigned>(snapshot.timestamp_us / 1000U));
 
@@ -1233,7 +1233,7 @@ class CameraBaseCalibration
   {
     // 先用清晰度过滤处理运动模糊；若过滤后视角不足，则回退到原始输入避免误删过多。
     std::vector<View> calibration_views = FilterBySharpness(input_views, config);
-    if (calibration_views.size() >= minimum_calibration_views &&
+    if (calibration_views.size() >= solver_view_floor &&
         calibration_views.size() < input_views.size())
     {
       XR_LOG_INFO("camera calibration: sharpness prefilter kept %u/%u views",
@@ -1268,7 +1268,7 @@ class CameraBaseCalibration
 
     const std::vector<View> filtered =
         FilterByRms(calibration_views, final_per_view_rms, config.max_reprojection_rms);
-    if (filtered.size() >= minimum_calibration_views &&
+    if (filtered.size() >= solver_view_floor &&
         filtered.size() < calibration_views.size())
     {
       cv::Mat filtered_camera_matrix;
@@ -1313,15 +1313,18 @@ class CameraBaseCalibration
         std::filesystem::path(output_dir) / "views.csv";
     const std::filesystem::path snippet_path =
         std::filesystem::path(output_dir) / "camera_info_snippet.txt";
+    const std::string xrobot_yaml_snippet =
+        MakeXRobotCameraInfoYaml(camera_matrix, distortion);
 
-    // 三个输出分别服务于 OpenCV 复用、视角质量复盘、CameraInfo 常量粘贴。
+    // 三个输出分别服务于 OpenCV 复用、视角质量复盘、xrobot.yaml 常量粘贴。
     WriteCalibrationYaml(yaml_path, config, camera_matrix, distortion, rms,
                          static_cast<int>(final_views.size()));
     WriteViewsCsv(csv_path, final_views, final_per_view_rms);
-    WriteCameraInfoSnippet(snippet_path, camera_matrix, distortion);
+    WriteCameraInfoSnippet(snippet_path, xrobot_yaml_snippet);
 
     output.rms = rms;
     output.yaml_path = yaml_path.string();
+    output.xrobot_yaml_snippet = xrobot_yaml_snippet;
     XR_LOG_PASS("camera calibration saved: views=%u rms=%.4f yaml=%s",
                 static_cast<unsigned>(final_views.size()), static_cast<float>(rms),
                 output.yaml_path.c_str());
@@ -1381,55 +1384,121 @@ class CameraBaseCalibration
   }
 
   /**
-   * @brief 写出可粘贴到 CameraInfo 配置中的内参片段。
-   *
-   * distortion_values 固定展开到 14 项，兼容当前 CameraTypes 畸变数组容量。
+   * @brief 返回当前相机像素编码在 xrobot.yaml 中使用的枚举文本。
    */
-  static void WriteCameraInfoSnippet(const std::filesystem::path& path,
-                                     const cv::Mat& camera_matrix,
-                                     const cv::Mat& distortion)
+  static const char* EncodingName()
   {
+    if constexpr (CameraInfoV.encoding == CameraTypes::Encoding::BGR8)
+    {
+      return "CameraTypes::Encoding::BGR8";
+    }
+    else if constexpr (CameraInfoV.encoding == CameraTypes::Encoding::RGB8)
+    {
+      return "CameraTypes::Encoding::RGB8";
+    }
+    else if constexpr (CameraInfoV.encoding == CameraTypes::Encoding::BGRA8)
+    {
+      return "CameraTypes::Encoding::BGRA8";
+    }
+    else if constexpr (CameraInfoV.encoding == CameraTypes::Encoding::RGBA8)
+    {
+      return "CameraTypes::Encoding::RGBA8";
+    }
+    else if constexpr (CameraInfoV.encoding == CameraTypes::Encoding::MONO8)
+    {
+      return "CameraTypes::Encoding::MONO8";
+    }
+    else
+    {
+      return "CameraTypes::Encoding::INVALID";
+    }
+  }
+
+  /**
+   * @brief 向 xrobot.yaml 片段追加一个 double 列表字段。
+   */
+  static void AppendYamlDoubleList(std::ostringstream& out, std::string_view key,
+                                   const double* values, std::size_t count)
+  {
+    out << "      " << key << ":\n";
+    for (std::size_t i = 0; i < count; ++i)
+    {
+      out << "        - " << values[i] << "\n";
+    }
+  }
+
+  /**
+   * @brief 生成 xrobot.yaml 中 `constexprs.MainCameraInfo` 的可粘贴片段。
+   */
+  static std::string MakeXRobotCameraInfoYaml(const cv::Mat& camera_matrix,
+                                              const cv::Mat& distortion)
+  {
+    std::array<double, 9> camera_values{};
+    for (int i = 0; i < 9; ++i)
+    {
+      camera_values[static_cast<std::size_t>(i)] =
+          camera_matrix.at<double>(i / 3, i % 3);
+    }
+
     std::array<double, 14> distortion_values{};
     const cv::Mat flat = distortion.reshape(1, 1);
-    // OpenCV 输出畸变项数量随模型变化，这里只拷贝 CameraInfo 能承载的前 14 项。
     for (int i = 0; i < std::min(flat.cols, static_cast<int>(distortion_values.size())); ++i)
     {
       distortion_values[static_cast<std::size_t>(i)] = flat.at<double>(0, i);
     }
 
-    std::ofstream out(path);
+    const std::array<double, 9> rectification_values{
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0};
+    const std::array<double, 12> projection_values{
+        camera_matrix.at<double>(0, 0), 0.0,
+        camera_matrix.at<double>(0, 2), 0.0,
+        0.0, camera_matrix.at<double>(1, 1),
+        camera_matrix.at<double>(1, 2), 0.0,
+        0.0, 0.0, 1.0, 0.0};
+
+    std::ostringstream out;
     out << std::setprecision(17);
-    out << "camera_matrix: [";
-    for (int i = 0; i < 9; ++i)
-    {
-      // CameraInfo 使用行优先的一维数组保存 3x3 内参矩阵。
-      if (i != 0)
-      {
-        out << ", ";
-      }
-      out << camera_matrix.at<double>(i / 3, i % 3);
-    }
-    out << "]\n";
+    out << "constexprs:\n";
+    out << "  MainCameraInfo:\n";
+    out << "    type: CameraTypes::CameraInfo\n";
+    out << "    value:\n";
+    out << "      width: " << static_cast<unsigned>(CameraInfoV.width) << "\n";
+    out << "      height: " << static_cast<unsigned>(CameraInfoV.height) << "\n";
+    out << "      step: " << static_cast<unsigned>(CameraInfoV.step) << "\n";
+    out << "      encoding: " << EncodingName() << "\n";
+    AppendYamlDoubleList(out, "camera_matrix", camera_values.data(),
+                         camera_values.size());
+    out << "      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB\n";
+    AppendYamlDoubleList(out, "distortion_coefficients",
+                         distortion_values.data(), distortion_values.size());
+    AppendYamlDoubleList(out, "rectification_matrix",
+                         rectification_values.data(), rectification_values.size());
+    AppendYamlDoubleList(out, "projection_matrix",
+                         projection_values.data(), projection_values.size());
+    return out.str();
+  }
 
-    out << "distortion_model: CameraTypes::DistortionModel::PLUMB_BOB\n";
-    out << "distortion_coefficients: [";
-    for (std::size_t i = 0; i < distortion_values.size(); ++i)
-    {
-      // 保持固定长度输出，便于直接替换现有 CameraInfo 常量。
-      if (i != 0)
-      {
-        out << ", ";
-      }
-      out << distortion_values[i];
-    }
-    out << "]\n";
+  /**
+   * @brief 写出可粘贴到 xrobot.yaml 的 CameraInfo 片段。
+   */
+  static void WriteCameraInfoSnippet(const std::filesystem::path& path,
+                                     const std::string& xrobot_yaml_snippet)
+  {
+    std::ofstream out(path);
+    out << xrobot_yaml_snippet;
+  }
 
-    out << "projection_matrix: ["
-        << camera_matrix.at<double>(0, 0) << ", 0.0, "
-        << camera_matrix.at<double>(0, 2) << ", 0.0, 0.0, "
-        << camera_matrix.at<double>(1, 1) << ", "
-        << camera_matrix.at<double>(1, 2)
-        << ", 0.0, 0.0, 0.0, 1.0, 0.0]\n";
+  /**
+   * @brief 标定成功后直接把 xrobot.yaml 片段打印到 stdout。
+   */
+  static void PrintXRobotYamlSnippet(const std::string& xrobot_yaml_snippet)
+  {
+    std::fputs("\n===== xrobot.yaml CameraInfo begin =====\n", stdout);
+    std::fputs(xrobot_yaml_snippet.c_str(), stdout);
+    std::fputs("===== xrobot.yaml CameraInfo end =====\n", stdout);
+    std::fflush(stdout);
   }
 
   /**

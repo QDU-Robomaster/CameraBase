@@ -368,7 +368,11 @@ class CameraBase
 
       if (argc == 3 && strcmp(argv[2], "save") == 0)
       {
-        return self->calibration_.SaveAndStop() ? 0 : -1;
+        if (self->calibration_.SaveAndStop())
+        {
+          std::exit(EXIT_SUCCESS);
+        }
+        return -1;
       }
 
       if (argc == 3 && strcmp(argv[2], "stop") == 0)
