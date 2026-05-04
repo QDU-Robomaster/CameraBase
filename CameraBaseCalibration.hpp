@@ -136,8 +136,8 @@ class CameraBaseCalibration
     config_ = MakeConfig(marker_mm, cols, rows);
     board_ = MakeGShangMarkerMap(config_);
     dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_ARUCO_ORIGINAL);
-    detector_params_ = cv::aruco::DetectorParameters::create();
-    detector_params_->cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
+    detector_params_ = cv::aruco::DetectorParameters();
+    detector_params_.cornerRefinementMethod = cv::aruco::CORNER_REFINE_SUBPIX;
 
     // 输出目录在启动阶段创建；后续 debug 图、CSV 和 YAML 都落在同一棵目录。
     output_dir_ = BuildOutputDir(camera_name, config_);
@@ -354,10 +354,10 @@ class CameraBaseCalibration
     Config config;
     /// 本轮标定板三维角点查表快照。
     BoardMap board;
-    /// OpenCV ArUco 字典；cv::Ptr 按引用计数安全复制。
-    cv::Ptr<cv::aruco::Dictionary> dictionary;
-    /// OpenCV 检测参数；cv::Ptr 按引用计数安全复制。
-    cv::Ptr<cv::aruco::DetectorParameters> detector_params;
+    /// OpenCV ArUco 字典，OpenCV 4.13 起位于 objdetect/aruco 新 API。
+    cv::aruco::Dictionary dictionary;
+    /// OpenCV 检测参数，OpenCV 4.13 起为普通值类型。
+    cv::aruco::DetectorParameters detector_params;
     /// 当前原始帧序号。
     uint64_t frame_index = 0;
     /// 当前帧时间戳，单位 us。
@@ -548,9 +548,10 @@ class CameraBaseCalibration
     std::vector<std::vector<cv::Point2f>> rejected;
     try
     {
-      cv::aruco::detectMarkers(image, snapshot.dictionary,
-                               detection.marker_corners, detection.marker_ids,
-                               snapshot.detector_params, rejected);
+      cv::aruco::ArucoDetector detector(snapshot.dictionary,
+                                        snapshot.detector_params);
+      detector.detectMarkers(image, detection.marker_corners,
+                             detection.marker_ids, rejected);
     }
     catch (const cv::Exception& e)
     {
@@ -1761,9 +1762,9 @@ class CameraBaseCalibration
   /// 当前 GShang 标定板 marker id 到三维角点的映射。
   BoardMap board_{};
   /// 当前 ArUco 字典实例。
-  cv::Ptr<cv::aruco::Dictionary> dictionary_{};
+  cv::aruco::Dictionary dictionary_{};
   /// 当前 ArUco 检测参数实例。
-  cv::Ptr<cv::aruco::DetectorParameters> detector_params_{};
+  cv::aruco::DetectorParameters detector_params_{};
   /// 已通过在线过滤并等待保存求解的点集；完整 debug 图在接受时立即写入磁盘。
   std::vector<View> accepted_views_{};
 
