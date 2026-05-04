@@ -87,7 +87,8 @@ ArUco-original 标记只放在 `(row + col) % 2 == 1` 的棋盘格中，完整�
 - 每接受一个有效视角都会打印当前已接受视角数、已截断帧数、已处理帧数和已检测帧数。
 - `cali status` 查看已处理帧、已检测帧、模糊拒绝数、重复拒绝数、有效视角数和输出目录。
 - `cali save` 会结束本轮标定、写出结果、直接打印可粘贴到 `xrobot.yaml` 的
-  `constexprs.MainCameraInfo` 片段，然后主动退出当前进程。
+  `constexprs.MainCameraInfo` 片段；打印前也会输出本次标定的重投影误差、
+  样本覆盖和内参合理性报告，然后主动退出当前进程。
 - `cali stop` 只停止并恢复图像发布，不写出新的标定结果。
 
 输出目录格式为 `runs/camera_calib/<时间>_<相机名>_<标记尺寸>mm_<列数>x<行数>/`，
@@ -95,6 +96,7 @@ ArUco-original 标记只放在 `(row + col) % 2 == 1` 的棋盘格中，完整�
 
 - `calibration.yml`：OpenCV 相机矩阵、畸变参数、RMS 和标定板几何。
 - `views.csv`：每个保留视角的帧号、时间戳、标记数、清晰度、画面位置、尺度、角度和误差。
+- `quality_report.txt`：保存成功时同步打印的重投影误差、样本覆盖和内参合理性报告。
 - `camera_info_snippet.txt`：可拷回 `xrobot.yaml` 的 `MainCameraInfo` 片段。
 - `debug/*.jpg`：每个接受视角的检测可视化图。
 

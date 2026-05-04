@@ -161,6 +161,7 @@ class CameraTypes
   }
 };
 
+#include "CameraBaseIntrinsicSanity.hpp"
 #include "CameraBaseCalibration.hpp"
 
 /**
@@ -219,6 +220,8 @@ class CameraBase
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
   static_assert(image_bytes > 0, "CameraBase requires non-zero image bytes");
+  static_assert(CameraBaseIntrinsicSanity::CameraInfoReasonable(camera_info),
+                "CameraBase compile-time CameraInfo intrinsics are unreasonable");
   static_assert(std::is_standard_layout_v<ImageFrame>,
                 "CameraBase::ImageFrame must be standard layout");
   static_assert(std::is_standard_layout_v<ImuStamped>,

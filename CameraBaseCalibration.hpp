@@ -269,6 +269,7 @@ class CameraBaseCalibration
       last_rms_ = output.rms;
       last_saved_yaml_ = output.yaml_path;
     }
+    PrintQualityReport(output.quality_report_text);
     PrintXRobotYamlSnippet(output.xrobot_yaml_snippet);
     return true;
   }
@@ -422,6 +423,10 @@ class CameraBaseCalibration
     double rms = -1.0;
     /// 写出的 calibration.yml 路径。
     std::string yaml_path;
+    /// 标定质量报告路径。
+    std::string quality_report_path;
+    /// 标定完成后打印到 stdout 的质量报告。
+    std::string quality_report_text;
     /// 可直接粘贴到 xrobot.yaml 的 CameraInfo constexpr 片段。
     std::string xrobot_yaml_snippet;
   };
@@ -1173,6 +1178,165 @@ class CameraBaseCalibration
   }
 
   /**
+   * @brief 从 OpenCV Mat 中抽取 3x3 内参数组。
+   */
+  static std::array<double, 9> CameraMatrixValues(const cv::Mat& camera_matrix)
+  {
+    std::array<double, 9> values{};
+    for (int i = 0; i < 9; ++i)
+    {
+      values[static_cast<std::size_t>(i)] =
+          camera_matrix.at<double>(i / 3, i % 3);
+    }
+    return values;
+  }
+
+  /**
+   * @brief 从 OpenCV 畸变 Mat 中抽取 CameraInfo 固定容量畸变数组。
+   */
+  static std::array<double, 14> DistortionValues(const cv::Mat& distortion)
+  {
+    std::array<double, 14> values{};
+    const cv::Mat flat = distortion.reshape(1, 1);
+    for (int i = 0; i < std::min(flat.cols, static_cast<int>(values.size())); ++i)
+    {
+      values[static_cast<std::size_t>(i)] = flat.at<double>(0, i);
+    }
+    return values;
+  }
+
+  /**
+   * @brief 根据内参生成 CameraInfo 使用的 3x4 投影矩阵。
+   */
+  static std::array<double, 12> ProjectionValues(const cv::Mat& camera_matrix)
+  {
+    return {camera_matrix.at<double>(0, 0), 0.0,
+            camera_matrix.at<double>(0, 2), 0.0,
+            0.0, camera_matrix.at<double>(1, 1),
+            camera_matrix.at<double>(1, 2), 0.0,
+            0.0, 0.0, 1.0, 0.0};
+  }
+
+  /**
+   * @brief 计算 RMS 分布的分位数。
+   */
+  static double Percentile(std::vector<double> values, double percentile)
+  {
+    if (values.empty())
+    {
+      return -1.0;
+    }
+
+    std::sort(values.begin(), values.end());
+    const double clamped = std::max(0.0, std::min(1.0, percentile));
+    const std::size_t index = static_cast<std::size_t>(
+        std::round(clamped * static_cast<double>(values.size() - 1)));
+    return values[index];
+  }
+
+  /**
+   * @brief 最终参与标定的样本覆盖指标。
+   */
+  struct CoverageMetrics
+  {
+    std::size_t views{0};              ///< 最终参与求解的视角数。
+    double center_x_min{0.0};          ///< 标定板中心 x 最小值，图像宽度归一化。
+    double center_x_max{0.0};          ///< 标定板中心 x 最大值，图像宽度归一化。
+    double center_y_min{0.0};          ///< 标定板中心 y 最小值，图像高度归一化。
+    double center_y_max{0.0};          ///< 标定板中心 y 最大值，图像高度归一化。
+    double scale_min{0.0};             ///< 标定板尺度最小值，按图像面积归一化。
+    double scale_max{0.0};             ///< 标定板尺度最大值，按图像面积归一化。
+    double angle_min_deg{0.0};         ///< 平面内旋转角最小值。
+    double angle_max_deg{0.0};         ///< 平面内旋转角最大值。
+    double center_span_x{0.0};         ///< 中心 x 覆盖跨度。
+    double center_span_y{0.0};         ///< 中心 y 覆盖跨度。
+    double scale_ratio{0.0};           ///< 最大尺度 / 最小尺度。
+    double angle_span_deg{0.0};        ///< 平面内旋转角覆盖跨度。
+  };
+
+  /**
+   * @brief 统计最终样本覆盖范围。
+   */
+  static CoverageMetrics ComputeCoverage(const std::vector<View>& views)
+  {
+    CoverageMetrics metrics{};
+    metrics.views = views.size();
+    if (views.empty())
+    {
+      return metrics;
+    }
+
+    metrics.center_x_min = views.front().center_x_norm;
+    metrics.center_x_max = views.front().center_x_norm;
+    metrics.center_y_min = views.front().center_y_norm;
+    metrics.center_y_max = views.front().center_y_norm;
+    metrics.scale_min = views.front().scale_norm;
+    metrics.scale_max = views.front().scale_norm;
+    metrics.angle_min_deg = views.front().angle_deg;
+    metrics.angle_max_deg = views.front().angle_deg;
+
+    for (const View& view : views)
+    {
+      metrics.center_x_min = std::min(metrics.center_x_min, view.center_x_norm);
+      metrics.center_x_max = std::max(metrics.center_x_max, view.center_x_norm);
+      metrics.center_y_min = std::min(metrics.center_y_min, view.center_y_norm);
+      metrics.center_y_max = std::max(metrics.center_y_max, view.center_y_norm);
+      metrics.scale_min = std::min(metrics.scale_min, view.scale_norm);
+      metrics.scale_max = std::max(metrics.scale_max, view.scale_norm);
+      metrics.angle_min_deg = std::min(metrics.angle_min_deg, view.angle_deg);
+      metrics.angle_max_deg = std::max(metrics.angle_max_deg, view.angle_deg);
+    }
+
+    metrics.center_span_x = metrics.center_x_max - metrics.center_x_min;
+    metrics.center_span_y = metrics.center_y_max - metrics.center_y_min;
+    metrics.scale_ratio =
+        metrics.scale_min > 0.0 ? metrics.scale_max / metrics.scale_min : 0.0;
+    metrics.angle_span_deg = metrics.angle_max_deg - metrics.angle_min_deg;
+    return metrics;
+  }
+
+  /**
+   * @brief 格式化标定完成后直接打印的质量报告。
+   */
+  static std::string MakeQualityReportText(
+      const std::vector<View>& views, const std::vector<double>& per_view_rms,
+      const CameraBaseIntrinsicSanity::Metrics& intrinsics, double global_rms,
+      double max_reprojection_rms)
+  {
+    const CoverageMetrics coverage = ComputeCoverage(views);
+    const double per_view_p50 = Percentile(per_view_rms, 0.50);
+    const double per_view_p95 = Percentile(per_view_rms, 0.95);
+    const double per_view_max = Percentile(per_view_rms, 1.00);
+    const bool reprojection_ok = global_rms >= 0.0 &&
+                                 global_rms <= max_reprojection_rms &&
+                                 per_view_max <= max_reprojection_rms;
+    const bool quality_ok = intrinsics.all_ok && reprojection_ok;
+
+    std::ostringstream out;
+    out << std::setprecision(10);
+    out << "===== calibration quality begin =====\n";
+    out << "quality_ok: " << (quality_ok ? 1 : 0) << "\n";
+    out << "views: " << coverage.views << "\n";
+    out << "reprojection_ok: " << (reprojection_ok ? 1 : 0) << "\n";
+    out << "max_reprojection_rms: " << max_reprojection_rms << "\n";
+    out << "global_rms: " << global_rms << "\n";
+    out << "per_view_rms_p50: " << per_view_p50 << "\n";
+    out << "per_view_rms_p95: " << per_view_p95 << "\n";
+    out << "per_view_rms_max: " << per_view_max << "\n";
+    out << "coverage_center_x: [" << coverage.center_x_min << ", "
+        << coverage.center_x_max << "] span=" << coverage.center_span_x << "\n";
+    out << "coverage_center_y: [" << coverage.center_y_min << ", "
+        << coverage.center_y_max << "] span=" << coverage.center_span_y << "\n";
+    out << "coverage_scale: [" << coverage.scale_min << ", "
+        << coverage.scale_max << "] ratio=" << coverage.scale_ratio << "\n";
+    out << "coverage_angle_deg: [" << coverage.angle_min_deg << ", "
+        << coverage.angle_max_deg << "] span=" << coverage.angle_span_deg << "\n";
+    out << CameraBaseIntrinsicSanity::FormatReport(intrinsics);
+    out << "===== calibration quality end =====\n";
+    return out.str();
+  }
+
+  /**
    * @brief 根据单视角重投影 RMS 剔除离群样本。
    */
   static std::vector<View> FilterByRms(const std::vector<View>& views,
@@ -1188,6 +1352,30 @@ class CameraBaseCalibration
       }
     }
     return filtered;
+  }
+
+  /**
+   * @brief 写出标定质量报告。
+   */
+  static std::string WriteQualityReport(
+      const std::filesystem::path& path, const std::vector<View>& views,
+      const std::vector<double>& per_view_rms, const cv::Mat& camera_matrix,
+      const cv::Mat& distortion, double global_rms, double max_reprojection_rms)
+  {
+    const std::array<double, 9> camera_values =
+        CameraMatrixValues(camera_matrix);
+    const std::array<double, 14> distortion_values =
+        DistortionValues(distortion);
+    const CameraBaseIntrinsicSanity::Metrics intrinsics =
+        CameraBaseIntrinsicSanity::Evaluate(CameraInfoV.width, CameraInfoV.height,
+                                            camera_values, distortion_values);
+
+    const std::string report =
+        MakeQualityReportText(views, per_view_rms, intrinsics, global_rms,
+                              max_reprojection_rms);
+    std::ofstream out(path);
+    out << report;
+    return report;
   }
 
   /**
@@ -1311,6 +1499,8 @@ class CameraBaseCalibration
         std::filesystem::path(output_dir) / "calibration.yml";
     const std::filesystem::path csv_path =
         std::filesystem::path(output_dir) / "views.csv";
+    const std::filesystem::path quality_path =
+        std::filesystem::path(output_dir) / "quality_report.txt";
     const std::filesystem::path snippet_path =
         std::filesystem::path(output_dir) / "camera_info_snippet.txt";
     const std::string xrobot_yaml_snippet =
@@ -1320,14 +1510,20 @@ class CameraBaseCalibration
     WriteCalibrationYaml(yaml_path, config, camera_matrix, distortion, rms,
                          static_cast<int>(final_views.size()));
     WriteViewsCsv(csv_path, final_views, final_per_view_rms);
+    const std::string quality_report =
+        WriteQualityReport(quality_path, final_views, final_per_view_rms,
+                           camera_matrix, distortion, rms,
+                           config.max_reprojection_rms);
     WriteCameraInfoSnippet(snippet_path, xrobot_yaml_snippet);
 
     output.rms = rms;
     output.yaml_path = yaml_path.string();
+    output.quality_report_path = quality_path.string();
+    output.quality_report_text = quality_report;
     output.xrobot_yaml_snippet = xrobot_yaml_snippet;
-    XR_LOG_PASS("camera calibration saved: views=%u rms=%.4f yaml=%s",
+    XR_LOG_PASS("camera calibration saved: views=%u rms=%.4f yaml=%s quality=%s",
                 static_cast<unsigned>(final_views.size()), static_cast<float>(rms),
-                output.yaml_path.c_str());
+                output.yaml_path.c_str(), output.quality_report_path.c_str());
     return true;
   }
 
@@ -1433,30 +1629,16 @@ class CameraBaseCalibration
   static std::string MakeXRobotCameraInfoYaml(const cv::Mat& camera_matrix,
                                               const cv::Mat& distortion)
   {
-    std::array<double, 9> camera_values{};
-    for (int i = 0; i < 9; ++i)
-    {
-      camera_values[static_cast<std::size_t>(i)] =
-          camera_matrix.at<double>(i / 3, i % 3);
-    }
-
-    std::array<double, 14> distortion_values{};
-    const cv::Mat flat = distortion.reshape(1, 1);
-    for (int i = 0; i < std::min(flat.cols, static_cast<int>(distortion_values.size())); ++i)
-    {
-      distortion_values[static_cast<std::size_t>(i)] = flat.at<double>(0, i);
-    }
-
+    const std::array<double, 9> camera_values =
+        CameraMatrixValues(camera_matrix);
+    const std::array<double, 14> distortion_values =
+        DistortionValues(distortion);
     const std::array<double, 9> rectification_values{
         1.0, 0.0, 0.0,
         0.0, 1.0, 0.0,
         0.0, 0.0, 1.0};
-    const std::array<double, 12> projection_values{
-        camera_matrix.at<double>(0, 0), 0.0,
-        camera_matrix.at<double>(0, 2), 0.0,
-        0.0, camera_matrix.at<double>(1, 1),
-        camera_matrix.at<double>(1, 2), 0.0,
-        0.0, 0.0, 1.0, 0.0};
+    const std::array<double, 12> projection_values =
+        ProjectionValues(camera_matrix);
 
     std::ostringstream out;
     out << std::setprecision(17);
@@ -1498,6 +1680,16 @@ class CameraBaseCalibration
     std::fputs("\n===== xrobot.yaml CameraInfo begin =====\n", stdout);
     std::fputs(xrobot_yaml_snippet.c_str(), stdout);
     std::fputs("===== xrobot.yaml CameraInfo end =====\n", stdout);
+    std::fflush(stdout);
+  }
+
+  /**
+   * @brief 标定成功后直接把样本覆盖和重投影质量报告打印到 stdout。
+   */
+  static void PrintQualityReport(const std::string& quality_report)
+  {
+    std::fputc('\n', stdout);
+    std::fputs(quality_report.c_str(), stdout);
     std::fflush(stdout);
   }
 
