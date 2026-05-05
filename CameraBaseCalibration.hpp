@@ -548,10 +548,19 @@ class CameraBaseCalibration
     std::vector<std::vector<cv::Point2f>> rejected;
     try
     {
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
       cv::aruco::ArucoDetector detector(snapshot.dictionary,
                                         snapshot.detector_params);
       detector.detectMarkers(image, detection.marker_corners,
                              detection.marker_ids, rejected);
+#else
+      const auto dictionary =
+          cv::makePtr<cv::aruco::Dictionary>(snapshot.dictionary);
+      const auto detector_params =
+          cv::makePtr<cv::aruco::DetectorParameters>(snapshot.detector_params);
+      cv::aruco::detectMarkers(image, dictionary, detection.marker_corners,
+                               detection.marker_ids, detector_params, rejected);
+#endif
     }
     catch (const cv::Exception& e)
     {
