@@ -211,8 +211,8 @@ class CameraBaseRecording
     std::vector<uint8_t> encoded;
     if (!EncodeJpeg(data, encoded))
     {
-      XR_LOG_ERROR("CameraBase(%s): jpeg encode failed at frame=%llu",
-                   name_.c_str(), static_cast<unsigned long long>(frame_index_));
+      XR_LOG_ERROR("CameraBase(%s): jpeg encode failed at frame=%u",
+                   name_.c_str(), static_cast<unsigned>(frame_index_));
       return false;
     }
 
@@ -223,8 +223,8 @@ class CameraBaseRecording
          << static_cast<unsigned long long>(encoded.size()) << "\n";
     if (!frames_.good() || !csv_.good())
     {
-      XR_LOG_ERROR("CameraBase(%s): recording write failed at frame=%llu",
-                   name_.c_str(), static_cast<unsigned long long>(frame_index_));
+      XR_LOG_ERROR("CameraBase(%s): recording write failed at frame=%u",
+                   name_.c_str(), static_cast<unsigned>(frame_index_));
       return false;
     }
 
