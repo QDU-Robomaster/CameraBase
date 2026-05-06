@@ -163,6 +163,7 @@ class CameraTypes
 
 #include "CameraBaseIntrinsicSanity.hpp"
 #include "CameraBaseCalibration.hpp"
+#include "CameraBaseRecording.hpp"
 
 /**
  * @class CameraBase
@@ -209,6 +210,8 @@ class CameraBase
   /// 图像生产者提交一帧后，由 sink 返回下一个可写槽位。
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
+  using RecordingParam = CameraBaseRecordingParam;  ///< CameraBase 原始图像内录配置。
+
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
   static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
                 "CameraBase timestamp ABI must stay 64-bit");
@@ -233,7 +236,8 @@ class CameraBase
 
   CameraBase(LibXR::HardwareContainer& hw, std::string_view name = "camera",
              std::string_view image_topic_name = "camera_image",
-             std::string_view imu_topic_name = "camera_imu")
+             std::string_view imu_topic_name = "camera_imu",
+             RecordingParam recording = {})
       : name_(name),
         image_topic_name_(image_topic_name),
         imu_topic_name_(imu_topic_name),
@@ -241,9 +245,10 @@ class CameraBase
         imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+    recording_.Open(name_, recording);
   }
 
-  virtual ~CameraBase() = default;
+  virtual ~CameraBase() { recording_.Close(); }
 
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
@@ -256,6 +261,16 @@ class CameraBase
 
   std::string_view ImuTopicNameView() const { return imu_topic_name_; }
   const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
+
+  bool RecordingEnabled() const { return recording_.Enabled(); }
+
+  std::string_view RecordingOutputDirView() const { return recording_.OutputDirView(); }
+
+  const char* RecordingOutputDir() const { return recording_.OutputDir(); }
+
+  std::string_view RecordingFileStemView() const { return recording_.FileStemView(); }
+
+  const char* RecordingFileStem() const { return recording_.FileStem(); }
 
   /// 发布已经由同步模块对齐完成的 IMU 包。
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
@@ -297,6 +312,12 @@ class CameraBase
                                   static_cast<uint64_t>(writable_image_->timestamp_us)))
     {
       return true;
+    }
+
+    if (!recording_.Record(writable_image_->data,
+                           static_cast<uint64_t>(writable_image_->timestamp_us)))
+    {
+      return false;
     }
 
     ImageFrame* next_image = nullptr;
@@ -402,7 +423,7 @@ class CameraBase
     return -1;
   }
 
- protected:
+ private:
   std::string name_;
   std::string image_topic_name_;
   std::string imu_topic_name_;
@@ -411,4 +432,5 @@ class CameraBase
   ImageFrame* writable_image_{nullptr};
   ImageCommitCallback image_commit_callback_{};
   CameraBaseCalibration<CameraInfoV> calibration_{};
+  CameraBaseRecording<CameraInfoV> recording_{};
 };
