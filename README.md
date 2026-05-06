@@ -5,7 +5,7 @@
 它本身不实现具体驱动，只负责定义：
 
 - 编译期静态相机信息
-- 原始图像和同步后 IMU 的数据结构
+- 图像帧和同步后 IMU 的数据结构
 - 图像 sink 的注册与提交边界
 
 ## 当前职责
@@ -23,11 +23,14 @@
   - `ImageSinkReady()`
   - `GetWritableImage()`
   - `CommitImage()`
+- 生产者侧内录
+  - 在 `CommitImage()` 进入同步模块前把图像帧压缩成 JPEG 记录
+  - 不通过订阅队列，因此不会因为 detector / preview 消费慢而丢帧
 
 ## 模块边界
 
 - `CameraBase<Info>`
-  - 只拥有类型定义、sink 边界和同步后 IMU 发布 helper
+  - 拥有类型定义、sink 边界、生产者侧图像内录和同步后 IMU 发布 helper
 - 具体相机模块，例如 `WebotsCamera<Info>`
   - 发布原始传感器数据
   - 把图像写进 `ImageFrame`
@@ -36,6 +39,29 @@
   - 承接图像 lease
   - 处理原始 `gyro / accl / quat`，并负责对齐
   - 发布同步后的 `ImuStamped`
+  - 记录图像时间戳与 IMU 时间戳的同步映射和 IMU 数据
+
+## 图像内录
+
+具体相机模块可以把 `CameraBase::RecordingParam` 透传到基类。开启后，
+`CameraBase` 在生产者提交点同步写出：
+
+- `<时间>_<相机名>_frames.bin`：所有 JPEG 压缩帧顺序追加。
+- `<时间>_<相机名>_frames.csv`：每帧的
+  `frame_index,camera_timestamp_us,offset_bytes,size_bytes`。
+- `<时间>_<相机名>_camera_info.yaml`：宽、高、step、encoding、未压缩单帧字节数、
+  `frame_codec: jpeg`、JPEG 质量、相机名和 stem。
+
+默认 `output_dir` 为空时，最终目录为 `runs/camera_record/<时间>_<相机名>/`。
+运行中实际写入同级 `<时间>_<相机名>.tmp/`，并先写出
+`<时间>_<相机名>.recording` 恢复标记。正常退出时会整理临时目录并改名成最终目录；
+如果比赛中直接断电，下次进程启动时会先扫描恢复标记，截掉 CSV/blob 尾部不完整记录，
+再把临时目录整理成可回放的最终目录。写盘不经过共享 topic 订阅者；磁盘慢会反压采集
+线程，但不会静默丢帧。
+
+`CameraFrameSync` 开启同步记录并复用同一目录时，会额外写出同 stem 的
+`<时间>_<相机名>_imu.csv`。这三份文件可以直接交给 `CaptureFileCamera` 的
+内录包模式回放。
 
 ## 同步相关约定
 
