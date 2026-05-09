@@ -30,6 +30,10 @@ depends: []
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
+
+#include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 /**
  * @class CameraTypes
@@ -220,10 +224,12 @@ class CameraBase
    */
   struct RecordingParam
   {
-    bool enable = false;  ///< 是否在 CameraBase 生产者侧记录每帧原始图像。
+    bool enable = false;  ///< 是否在 CameraBase 生产者侧记录每帧图像。
     std::string_view output_dir = {};  ///< 为空时自动创建 runs/camera_record/...。
     bool overwrite = false;  ///< false 时拒绝覆盖已有同 stem 内录文件。
     uint32_t flush_every_frames = 30;  ///< 每隔多少帧 flush 一次，0 表示只依赖析构。
+    std::string_view codec = "png";  ///< `png` 为无损压缩；`raw` 为原始字节。
+    uint8_t png_compression = 1;  ///< PNG 压缩级别 0..9；1 优先保证实时写盘。
   };
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
@@ -437,6 +443,96 @@ class CameraBase
   }
 
  protected:
+  enum class RecordingCodec : uint8_t
+  {
+    RAW,
+    PNG
+  };
+
+  static bool StringEqualsIgnoreCase(std::string_view lhs, std::string_view rhs)
+  {
+    if (lhs.size() != rhs.size())
+    {
+      return false;
+    }
+    for (std::size_t i = 0; i < lhs.size(); ++i)
+    {
+      char a = lhs[i];
+      char b = rhs[i];
+      if (a >= 'A' && a <= 'Z')
+      {
+        a = static_cast<char>(a - 'A' + 'a');
+      }
+      if (b >= 'A' && b <= 'Z')
+      {
+        b = static_cast<char>(b - 'A' + 'a');
+      }
+      if (a != b)
+      {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static bool ParseRecordingCodec(std::string_view codec, RecordingCodec& out)
+  {
+    if (codec.empty() || StringEqualsIgnoreCase(codec, "png"))
+    {
+      out = RecordingCodec::PNG;
+      return true;
+    }
+    if (StringEqualsIgnoreCase(codec, "raw"))
+    {
+      out = RecordingCodec::RAW;
+      return true;
+    }
+    return false;
+  }
+
+  static const char* RecordingCodecName(RecordingCodec codec)
+  {
+    switch (codec)
+    {
+      case RecordingCodec::RAW:
+        return "raw";
+      case RecordingCodec::PNG:
+      default:
+        return "png";
+    }
+  }
+
+  static constexpr bool RecordingPngSupported()
+  {
+    return CameraInfoV.encoding == CameraTypes::Encoding::BGR8 ||
+           CameraInfoV.encoding == CameraTypes::Encoding::BGRA8 ||
+           CameraInfoV.encoding == CameraTypes::Encoding::MONO8;
+  }
+
+  cv::Mat MakeRecordingMat(const ImageFrame& frame) const
+  {
+    switch (CameraInfoV.encoding)
+    {
+      case CameraTypes::Encoding::BGR8:
+        return cv::Mat(static_cast<int>(CameraInfoV.height),
+                       static_cast<int>(CameraInfoV.width), CV_8UC3,
+                       const_cast<uint8_t*>(frame.data.data()),
+                       static_cast<std::size_t>(CameraInfoV.step));
+      case CameraTypes::Encoding::BGRA8:
+        return cv::Mat(static_cast<int>(CameraInfoV.height),
+                       static_cast<int>(CameraInfoV.width), CV_8UC4,
+                       const_cast<uint8_t*>(frame.data.data()),
+                       static_cast<std::size_t>(CameraInfoV.step));
+      case CameraTypes::Encoding::MONO8:
+        return cv::Mat(static_cast<int>(CameraInfoV.height),
+                       static_cast<int>(CameraInfoV.width), CV_8UC1,
+                       const_cast<uint8_t*>(frame.data.data()),
+                       static_cast<std::size_t>(CameraInfoV.step));
+      default:
+        return {};
+    }
+  }
+
   static std::string SanitizeRecordingName(std::string_view camera_name)
   {
     std::string safe;
@@ -492,6 +588,21 @@ class CameraBase
                                 ? MakeDefaultRecordingDir(recording_file_stem_)
                                 : std::string(recording.output_dir);
     recording_flush_every_frames_ = recording.flush_every_frames;
+    if (!ParseRecordingCodec(recording.codec, recording_codec_))
+    {
+      XR_LOG_ERROR("CameraBase(%s): unsupported recording codec '%s'",
+                   name_.c_str(), std::string(recording.codec).c_str());
+      throw std::runtime_error("CameraBase: unsupported recording codec");
+    }
+    if (recording_codec_ == RecordingCodec::PNG && !RecordingPngSupported())
+    {
+      XR_LOG_ERROR("CameraBase(%s): png recording does not support encoding=%u",
+                   name_.c_str(), static_cast<unsigned>(CameraInfoV.encoding));
+      throw std::runtime_error("CameraBase: unsupported png recording encoding");
+    }
+    recording_codec_name_ = RecordingCodecName(recording_codec_);
+    recording_png_compression_ =
+        recording.png_compression > 9U ? 9U : recording.png_compression;
 
     std::error_code ec;
     std::filesystem::create_directories(recording_output_dir_, ec);
@@ -523,11 +634,12 @@ class CameraBase
     }
 
     WriteRecordingCameraInfo(dir / (recording_file_stem_ + "_camera_info.yaml"));
-    recording_csv_ << "frame_index,camera_timestamp_us,offset_bytes,size_bytes\n";
+    recording_csv_ << "frame_index,camera_timestamp_us,offset_bytes,size_bytes,codec\n";
     recording_enabled_ = true;
-    XR_LOG_PASS("CameraBase(%s): recording enabled dir=%s stem=%s bytes_per_frame=%u",
+    XR_LOG_PASS(
+        "CameraBase(%s): recording enabled dir=%s stem=%s codec=%s bytes_per_frame=%u",
                 name_.c_str(), recording_output_dir_.c_str(),
-                recording_file_stem_.c_str(),
+                recording_file_stem_.c_str(), recording_codec_name_.c_str(),
                 static_cast<unsigned>(image_bytes));
   }
 
@@ -562,6 +674,12 @@ class CameraBase
     out << "image_bytes: " << static_cast<unsigned long long>(image_bytes) << "\n";
     out << "camera_name: " << name_ << "\n";
     out << "recording_stem: " << recording_file_stem_ << "\n";
+    out << "recording_codec: " << recording_codec_name_ << "\n";
+    if (recording_codec_ == RecordingCodec::PNG)
+    {
+      out << "png_compression: " << static_cast<unsigned>(recording_png_compression_)
+          << "\n";
+    }
   }
 
   bool RecordImageFrame(const ImageFrame& frame)
@@ -579,12 +697,42 @@ class CameraBase
     }
     const auto offset = static_cast<std::streamoff>(offset_pos);
 
-    recording_frames_.write(reinterpret_cast<const char*>(frame.data.data()),
-                            static_cast<std::streamsize>(image_bytes));
+    std::size_t payload_size = image_bytes;
+    if (recording_codec_ == RecordingCodec::RAW)
+    {
+      recording_frames_.write(reinterpret_cast<const char*>(frame.data.data()),
+                              static_cast<std::streamsize>(image_bytes));
+    }
+    else
+    {
+      const cv::Mat image = MakeRecordingMat(frame);
+      if (image.empty())
+      {
+        XR_LOG_ERROR("CameraBase(%s): cannot build recording image mat", name_.c_str());
+        return false;
+      }
+      recording_encoded_frame_.clear();
+      const std::vector<int> params = {
+          cv::IMWRITE_PNG_COMPRESSION,
+          static_cast<int>(recording_png_compression_)};
+      if (!cv::imencode(".png", image, recording_encoded_frame_, params) ||
+          recording_encoded_frame_.empty())
+      {
+        XR_LOG_ERROR("CameraBase(%s): png recording encode failed at frame=%llu",
+                     name_.c_str(),
+                     static_cast<unsigned long long>(recording_frame_index_));
+        return false;
+      }
+      payload_size = recording_encoded_frame_.size();
+      recording_frames_.write(
+          reinterpret_cast<const char*>(recording_encoded_frame_.data()),
+          static_cast<std::streamsize>(recording_encoded_frame_.size()));
+    }
     recording_csv_ << recording_frame_index_ << ","
                    << static_cast<unsigned long long>(frame.timestamp_us) << ","
                    << static_cast<unsigned long long>(offset) << ","
-                   << static_cast<unsigned long long>(image_bytes) << "\n";
+                   << static_cast<unsigned long long>(payload_size) << ","
+                   << recording_codec_name_ << "\n";
     if (!recording_frames_.good() || !recording_csv_.good())
     {
       XR_LOG_ERROR("CameraBase(%s): recording write failed at frame=%llu",
@@ -612,10 +760,14 @@ class CameraBase
   ImageCommitCallback image_commit_callback_{};
   CameraBaseCalibration<CameraInfoV> calibration_{};
   bool recording_enabled_{false};
+  RecordingCodec recording_codec_{RecordingCodec::PNG};
+  std::string recording_codec_name_{"png"};
+  uint8_t recording_png_compression_{1};
   uint32_t recording_flush_every_frames_{30};
   uint64_t recording_frame_index_{0};
   std::string recording_output_dir_{};
   std::string recording_file_stem_{};
   std::ofstream recording_frames_{};
   std::ofstream recording_csv_{};
+  std::vector<uint8_t> recording_encoded_frame_{};
 };

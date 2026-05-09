@@ -46,14 +46,17 @@
 具体相机模块可以把 `CameraBase::RecordingParam` 透传到基类。开启后，
 `CameraBase` 在生产者提交点同步写出：
 
-- `<时间>_<相机名>_frames.bin`：所有图像原始字节顺序追加，像素格式与
-  `CameraInfo.encoding` 一致。
+- `<时间>_<相机名>_frames.bin`：所有图像载荷顺序追加。默认载荷是 PNG
+  无损压缩；也可用 `recording.codec: raw` 写原始字节。
 - `<时间>_<相机名>_frames.csv`：每帧的
-  `frame_index,camera_timestamp_us,offset_bytes,size_bytes`。
-- `<时间>_<相机名>_camera_info.yaml`：宽、高、step、encoding、单帧字节数、相机名和 stem。
+  `frame_index,camera_timestamp_us,offset_bytes,size_bytes,codec`。
+- `<时间>_<相机名>_camera_info.yaml`：宽、高、step、encoding、单帧字节数、相机名、stem 和载荷 codec。
 
 默认 `output_dir` 为空时，目录为 `runs/camera_record/<时间>_<相机名>/`。写盘不经过
 共享 topic 订阅者；磁盘慢会反压采集线程，但不会静默丢帧。
+
+PNG 是逐帧无损压缩，默认 `png_compression=1`，优先保证写盘速度。旧的 raw 包和
+新的 PNG 包都通过同一套 `frames.bin + frames.csv + imu.csv` 协议回放。
 
 `CameraFrameSync` 开启同步记录并复用同一目录时，会额外写出同 stem 的
 `<时间>_<相机名>_imu.csv`。这三份文件可以直接交给 `CaptureFileCamera` 的
