@@ -16,24 +16,14 @@ depends: []
 #include "ramfs.hpp"
 
 #include <array>
-#include <ctime>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
 #include <limits>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <vector>
-
-#include <opencv2/core.hpp>
-#include <opencv2/imgcodecs.hpp>
 
 /**
  * @class CameraTypes
@@ -173,6 +163,7 @@ class CameraTypes
 
 #include "CameraBaseIntrinsicSanity.hpp"
 #include "CameraBaseCalibration.hpp"
+#include "CameraBaseRecording.hpp"
 
 /**
  * @class CameraBase
@@ -195,7 +186,7 @@ class CameraBase
 
   /**
    * @struct ImageFrame
-   * @brief 固定尺寸的原始图像帧载荷。
+   * @brief 固定尺寸的图像帧载荷。
    */
   struct alignas(image_alignment) ImageFrame
   {
@@ -219,18 +210,7 @@ class CameraBase
   /// 图像生产者提交一帧后，由 sink 返回下一个可写槽位。
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
-  /**
-   * @brief CameraBase 原始图像内录配置。
-   */
-  struct RecordingParam
-  {
-    bool enable = false;  ///< 是否在 CameraBase 生产者侧记录每帧图像。
-    std::string_view output_dir = {};  ///< 为空时自动创建 runs/camera_record/...。
-    bool overwrite = false;  ///< false 时拒绝覆盖已有同 stem 内录文件。
-    uint32_t flush_every_frames = 30;  ///< 每隔多少帧 flush 一次，0 表示只依赖析构。
-    std::string_view codec = "png";  ///< `png` 为无损压缩；`raw` 为原始字节。
-    uint8_t png_compression = 1;  ///< PNG 压缩级别 0..9；1 优先保证实时写盘。
-  };
+  using RecordingParam = CameraBaseRecordingParam;  ///< CameraBase 图像内录配置。
 
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
   static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
@@ -265,10 +245,10 @@ class CameraBase
         imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
-    OpenRecording(recording);
+    recording_.Open(name_, recording);
   }
 
-  virtual ~CameraBase() { CloseRecording(); }
+  virtual ~CameraBase() { recording_.Close(); }
 
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
@@ -282,15 +262,15 @@ class CameraBase
   std::string_view ImuTopicNameView() const { return imu_topic_name_; }
   const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
 
-  bool RecordingEnabled() const { return recording_enabled_; }
+  bool RecordingEnabled() const { return recording_.Enabled(); }
 
-  std::string_view RecordingOutputDirView() const { return recording_output_dir_; }
+  std::string_view RecordingOutputDirView() const { return recording_.OutputDirView(); }
 
-  const char* RecordingOutputDir() const { return recording_output_dir_.c_str(); }
+  const char* RecordingOutputDir() const { return recording_.OutputDir(); }
 
-  std::string_view RecordingFileStemView() const { return recording_file_stem_; }
+  std::string_view RecordingFileStemView() const { return recording_.FileStemView(); }
 
-  const char* RecordingFileStem() const { return recording_file_stem_.c_str(); }
+  const char* RecordingFileStem() const { return recording_.FileStem(); }
 
   /// 发布已经由同步模块对齐完成的 IMU 包。
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
@@ -334,7 +314,8 @@ class CameraBase
       return true;
     }
 
-    if (!RecordImageFrame(*writable_image_))
+    if (!recording_.Record(writable_image_->data,
+                           static_cast<uint64_t>(writable_image_->timestamp_us)))
     {
       return false;
     }
@@ -442,315 +423,7 @@ class CameraBase
     return -1;
   }
 
- protected:
-  enum class RecordingCodec : uint8_t
-  {
-    RAW,
-    PNG
-  };
-
-  static bool StringEqualsIgnoreCase(std::string_view lhs, std::string_view rhs)
-  {
-    if (lhs.size() != rhs.size())
-    {
-      return false;
-    }
-    for (std::size_t i = 0; i < lhs.size(); ++i)
-    {
-      char a = lhs[i];
-      char b = rhs[i];
-      if (a >= 'A' && a <= 'Z')
-      {
-        a = static_cast<char>(a - 'A' + 'a');
-      }
-      if (b >= 'A' && b <= 'Z')
-      {
-        b = static_cast<char>(b - 'A' + 'a');
-      }
-      if (a != b)
-      {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  static bool ParseRecordingCodec(std::string_view codec, RecordingCodec& out)
-  {
-    if (codec.empty() || StringEqualsIgnoreCase(codec, "png"))
-    {
-      out = RecordingCodec::PNG;
-      return true;
-    }
-    if (StringEqualsIgnoreCase(codec, "raw"))
-    {
-      out = RecordingCodec::RAW;
-      return true;
-    }
-    return false;
-  }
-
-  static const char* RecordingCodecName(RecordingCodec codec)
-  {
-    switch (codec)
-    {
-      case RecordingCodec::RAW:
-        return "raw";
-      case RecordingCodec::PNG:
-      default:
-        return "png";
-    }
-  }
-
-  static constexpr bool RecordingPngSupported()
-  {
-    return CameraInfoV.encoding == CameraTypes::Encoding::BGR8 ||
-           CameraInfoV.encoding == CameraTypes::Encoding::BGRA8 ||
-           CameraInfoV.encoding == CameraTypes::Encoding::MONO8;
-  }
-
-  cv::Mat MakeRecordingMat(const ImageFrame& frame) const
-  {
-    switch (CameraInfoV.encoding)
-    {
-      case CameraTypes::Encoding::BGR8:
-        return cv::Mat(static_cast<int>(CameraInfoV.height),
-                       static_cast<int>(CameraInfoV.width), CV_8UC3,
-                       const_cast<uint8_t*>(frame.data.data()),
-                       static_cast<std::size_t>(CameraInfoV.step));
-      case CameraTypes::Encoding::BGRA8:
-        return cv::Mat(static_cast<int>(CameraInfoV.height),
-                       static_cast<int>(CameraInfoV.width), CV_8UC4,
-                       const_cast<uint8_t*>(frame.data.data()),
-                       static_cast<std::size_t>(CameraInfoV.step));
-      case CameraTypes::Encoding::MONO8:
-        return cv::Mat(static_cast<int>(CameraInfoV.height),
-                       static_cast<int>(CameraInfoV.width), CV_8UC1,
-                       const_cast<uint8_t*>(frame.data.data()),
-                       static_cast<std::size_t>(CameraInfoV.step));
-      default:
-        return {};
-    }
-  }
-
-  static std::string SanitizeRecordingName(std::string_view camera_name)
-  {
-    std::string safe;
-    if (camera_name.empty())
-    {
-      return "camera";
-    }
-    for (char ch : camera_name)
-    {
-      const bool ok = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
-                      (ch >= 'a' && ch <= 'z') || ch == '_' || ch == '-';
-      safe.push_back(ok ? ch : '_');
-    }
-    return safe;
-  }
-
-  static std::string MakeRecordingTimestamp()
-  {
-    std::time_t now = std::time(nullptr);
-    std::tm local{};
-#if defined(_WIN32)
-    localtime_s(&local, &now);
-#else
-    localtime_r(&now, &local);
-#endif
-
-    std::ostringstream stamp;
-    stamp << std::put_time(&local, "%Y%m%d_%H%M%S");
-    return stamp.str();
-  }
-
-  static std::string MakeRecordingFileStem(std::string_view camera_name)
-  {
-    return MakeRecordingTimestamp() + "_" + SanitizeRecordingName(camera_name);
-  }
-
-  static std::string MakeDefaultRecordingDir(std::string_view file_stem)
-  {
-    return (std::filesystem::path("runs") / "camera_record" /
-            std::string(file_stem))
-        .string();
-  }
-
-  void OpenRecording(const RecordingParam& recording)
-  {
-    if (!recording.enable)
-    {
-      return;
-    }
-
-    recording_file_stem_ = MakeRecordingFileStem(name_);
-    recording_output_dir_ = recording.output_dir.empty()
-                                ? MakeDefaultRecordingDir(recording_file_stem_)
-                                : std::string(recording.output_dir);
-    recording_flush_every_frames_ = recording.flush_every_frames;
-    if (!ParseRecordingCodec(recording.codec, recording_codec_))
-    {
-      XR_LOG_ERROR("CameraBase(%s): unsupported recording codec '%s'",
-                   name_.c_str(), std::string(recording.codec).c_str());
-      throw std::runtime_error("CameraBase: unsupported recording codec");
-    }
-    if (recording_codec_ == RecordingCodec::PNG && !RecordingPngSupported())
-    {
-      XR_LOG_ERROR("CameraBase(%s): png recording does not support encoding=%u",
-                   name_.c_str(), static_cast<unsigned>(CameraInfoV.encoding));
-      throw std::runtime_error("CameraBase: unsupported png recording encoding");
-    }
-    recording_codec_name_ = RecordingCodecName(recording_codec_);
-    recording_png_compression_ =
-        recording.png_compression > 9U ? 9U : recording.png_compression;
-
-    std::error_code ec;
-    std::filesystem::create_directories(recording_output_dir_, ec);
-    if (ec)
-    {
-      XR_LOG_ERROR("CameraBase(%s): create recording dir failed %s: %s",
-                   name_.c_str(), recording_output_dir_.c_str(), ec.message().c_str());
-      throw std::runtime_error("CameraBase: create recording dir failed");
-    }
-
-    const std::filesystem::path dir(recording_output_dir_);
-    const auto frames_path = dir / (recording_file_stem_ + "_frames.bin");
-    const auto csv_path = dir / (recording_file_stem_ + "_frames.csv");
-    if (!recording.overwrite &&
-        (std::filesystem::exists(frames_path) || std::filesystem::exists(csv_path)))
-    {
-      XR_LOG_ERROR("CameraBase(%s): recording files already exist in %s",
-                   name_.c_str(), recording_output_dir_.c_str());
-      throw std::runtime_error("CameraBase: recording files already exist");
-    }
-
-    recording_frames_.open(frames_path, std::ios::binary | std::ios::trunc);
-    recording_csv_.open(csv_path, std::ios::out | std::ios::trunc);
-    if (!recording_frames_.is_open() || !recording_csv_.is_open())
-    {
-      XR_LOG_ERROR("CameraBase(%s): open recording files failed in %s",
-                   name_.c_str(), recording_output_dir_.c_str());
-      throw std::runtime_error("CameraBase: open recording files failed");
-    }
-
-    WriteRecordingCameraInfo(dir / (recording_file_stem_ + "_camera_info.yaml"));
-    recording_csv_ << "frame_index,camera_timestamp_us,offset_bytes,size_bytes,codec\n";
-    recording_enabled_ = true;
-    XR_LOG_PASS(
-        "CameraBase(%s): recording enabled dir=%s stem=%s codec=%s bytes_per_frame=%u",
-                name_.c_str(), recording_output_dir_.c_str(),
-                recording_file_stem_.c_str(), recording_codec_name_.c_str(),
-                static_cast<unsigned>(image_bytes));
-  }
-
-  void CloseRecording()
-  {
-    if (recording_csv_.is_open())
-    {
-      recording_csv_.flush();
-      recording_csv_.close();
-    }
-    if (recording_frames_.is_open())
-    {
-      recording_frames_.flush();
-      recording_frames_.close();
-    }
-  }
-
-  void WriteRecordingCameraInfo(const std::filesystem::path& path) const
-  {
-    std::ofstream out(path, std::ios::out | std::ios::trunc);
-    if (!out.is_open())
-    {
-      XR_LOG_ERROR("CameraBase(%s): open camera_info.yaml failed %s",
-                   name_.c_str(), path.string().c_str());
-      throw std::runtime_error("CameraBase: open recording camera info failed");
-    }
-
-    out << "width: " << static_cast<unsigned>(CameraInfoV.width) << "\n";
-    out << "height: " << static_cast<unsigned>(CameraInfoV.height) << "\n";
-    out << "step: " << static_cast<unsigned>(CameraInfoV.step) << "\n";
-    out << "encoding: " << static_cast<unsigned>(CameraInfoV.encoding) << "\n";
-    out << "image_bytes: " << static_cast<unsigned long long>(image_bytes) << "\n";
-    out << "camera_name: " << name_ << "\n";
-    out << "recording_stem: " << recording_file_stem_ << "\n";
-    out << "recording_codec: " << recording_codec_name_ << "\n";
-    if (recording_codec_ == RecordingCodec::PNG)
-    {
-      out << "png_compression: " << static_cast<unsigned>(recording_png_compression_)
-          << "\n";
-    }
-  }
-
-  bool RecordImageFrame(const ImageFrame& frame)
-  {
-    if (!recording_enabled_)
-    {
-      return true;
-    }
-
-    const auto offset_pos = recording_frames_.tellp();
-    if (offset_pos == std::streampos(-1))
-    {
-      XR_LOG_ERROR("CameraBase(%s): recording tellp failed", name_.c_str());
-      return false;
-    }
-    const auto offset = static_cast<std::streamoff>(offset_pos);
-
-    std::size_t payload_size = image_bytes;
-    if (recording_codec_ == RecordingCodec::RAW)
-    {
-      recording_frames_.write(reinterpret_cast<const char*>(frame.data.data()),
-                              static_cast<std::streamsize>(image_bytes));
-    }
-    else
-    {
-      const cv::Mat image = MakeRecordingMat(frame);
-      if (image.empty())
-      {
-        XR_LOG_ERROR("CameraBase(%s): cannot build recording image mat", name_.c_str());
-        return false;
-      }
-      recording_encoded_frame_.clear();
-      const std::vector<int> params = {
-          cv::IMWRITE_PNG_COMPRESSION,
-          static_cast<int>(recording_png_compression_)};
-      if (!cv::imencode(".png", image, recording_encoded_frame_, params) ||
-          recording_encoded_frame_.empty())
-      {
-        XR_LOG_ERROR("CameraBase(%s): png recording encode failed at frame=%llu",
-                     name_.c_str(),
-                     static_cast<unsigned long long>(recording_frame_index_));
-        return false;
-      }
-      payload_size = recording_encoded_frame_.size();
-      recording_frames_.write(
-          reinterpret_cast<const char*>(recording_encoded_frame_.data()),
-          static_cast<std::streamsize>(recording_encoded_frame_.size()));
-    }
-    recording_csv_ << recording_frame_index_ << ","
-                   << static_cast<unsigned long long>(frame.timestamp_us) << ","
-                   << static_cast<unsigned long long>(offset) << ","
-                   << static_cast<unsigned long long>(payload_size) << ","
-                   << recording_codec_name_ << "\n";
-    if (!recording_frames_.good() || !recording_csv_.good())
-    {
-      XR_LOG_ERROR("CameraBase(%s): recording write failed at frame=%llu",
-                   name_.c_str(),
-                   static_cast<unsigned long long>(recording_frame_index_));
-      return false;
-    }
-
-    ++recording_frame_index_;
-    if (recording_flush_every_frames_ != 0 &&
-        (recording_frame_index_ % recording_flush_every_frames_) == 0)
-    {
-      recording_frames_.flush();
-      recording_csv_.flush();
-    }
-    return true;
-  }
-
+ private:
   std::string name_;
   std::string image_topic_name_;
   std::string imu_topic_name_;
@@ -759,15 +432,5 @@ class CameraBase
   ImageFrame* writable_image_{nullptr};
   ImageCommitCallback image_commit_callback_{};
   CameraBaseCalibration<CameraInfoV> calibration_{};
-  bool recording_enabled_{false};
-  RecordingCodec recording_codec_{RecordingCodec::PNG};
-  std::string recording_codec_name_{"png"};
-  uint8_t recording_png_compression_{1};
-  uint32_t recording_flush_every_frames_{30};
-  uint64_t recording_frame_index_{0};
-  std::string recording_output_dir_{};
-  std::string recording_file_stem_{};
-  std::ofstream recording_frames_{};
-  std::ofstream recording_csv_{};
-  std::vector<uint8_t> recording_encoded_frame_{};
+  CameraBaseRecording<CameraInfoV> recording_{};
 };
