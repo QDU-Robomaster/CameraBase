@@ -13,14 +13,10 @@ file(GLOB MODULE_CAMERABASE_SRC CONFIGURE_DEPENDS
 
 target_sources(xr PRIVATE ${MODULE_CAMERABASE_SRC})
 
-# 模块依赖壳。CameraBase 在线标定使用 OpenCV ArUco / calib3d。
+# 模块依赖壳。
 get_filename_component(_MODULE_DIRNAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 set(_DEPS_TARGET "${_MODULE_DIRNAME}_deps")
 add_library(${_DEPS_TARGET} INTERFACE)
-
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc aruco calib3d imgcodecs)
-
-target_link_libraries(${_DEPS_TARGET} INTERFACE ${OpenCV_LIBS})
 
 # target_compile_definitions(${_DEPS_TARGET} INTERFACE
 #   # FOO=1

@@ -162,8 +162,6 @@ class CameraTypes
 };
 
 #include "CameraBaseIntrinsicSanity.hpp"
-#include "CameraBaseCalibration.hpp"
-#include "CameraBaseRecording.hpp"
 
 /**
  * @class CameraBase
@@ -210,8 +208,6 @@ class CameraBase
   /// 图像生产者提交一帧后，由 sink 返回下一个可写槽位。
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
-  using RecordingParam = CameraBaseRecordingParam;  ///< CameraBase 图像内录配置。
-
   // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
   static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
                 "CameraBase timestamp ABI must stay 64-bit");
@@ -236,8 +232,7 @@ class CameraBase
 
   CameraBase(LibXR::HardwareContainer& hw, std::string_view name = "camera",
              std::string_view image_topic_name = "camera_image",
-             std::string_view imu_topic_name = "camera_imu",
-             RecordingParam recording = {})
+             std::string_view imu_topic_name = "camera_imu")
       : name_(name),
         image_topic_name_(image_topic_name),
         imu_topic_name_(imu_topic_name),
@@ -245,10 +240,9 @@ class CameraBase
         imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
   {
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
-    recording_.Open(name_, recording);
   }
 
-  virtual ~CameraBase() { recording_.Close(); }
+  virtual ~CameraBase() = default;
 
   virtual void SetExposure(double exposure) = 0;
   virtual void SetGain(double gain) = 0;
@@ -261,16 +255,6 @@ class CameraBase
 
   std::string_view ImuTopicNameView() const { return imu_topic_name_; }
   const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
-
-  bool RecordingEnabled() const { return recording_.Enabled(); }
-
-  std::string_view RecordingOutputDirView() const { return recording_.OutputDirView(); }
-
-  const char* RecordingOutputDir() const { return recording_.OutputDir(); }
-
-  std::string_view RecordingFileStemView() const { return recording_.FileStemView(); }
-
-  const char* RecordingFileStem() const { return recording_.FileStem(); }
 
   /// 发布已经由同步模块对齐完成的 IMU 包。
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
@@ -308,18 +292,6 @@ class CameraBase
       return false;
     }
 
-    if (calibration_.ProcessFrame(writable_image_->data.data(),
-                                  static_cast<uint64_t>(writable_image_->timestamp_us)))
-    {
-      return true;
-    }
-
-    if (!recording_.Record(writable_image_->data,
-                           static_cast<uint64_t>(writable_image_->timestamp_us)))
-    {
-      return false;
-    }
-
     ImageFrame* next_image = nullptr;
     image_commit_callback_.Run(false, next_image);
     if (next_image == nullptr)
@@ -333,25 +305,6 @@ class CameraBase
     return true;
   }
 
-  static bool ParsePositiveIntArg(const char* text, int& value)
-  {
-    if (text == nullptr || *text == '\0')
-    {
-      return false;
-    }
-
-    char* end = nullptr;
-    const long parsed = std::strtol(text, &end, 10);
-    if (end == text || *end != '\0' || parsed <= 0 ||
-        parsed > static_cast<long>(std::numeric_limits<int>::max()))
-    {
-      return false;
-    }
-
-    value = static_cast<int>(parsed);
-    return true;
-  }
-
   // 调试/bring-up 阶段的命令入口。
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
@@ -361,49 +314,7 @@ class CameraBase
       LibXR::STDIO::Printf<"用法:\r\n">();
       LibXR::STDIO::Printf<"  set_exposure <曝光>\r\n">();
       LibXR::STDIO::Printf<"  set_gain <增益>\r\n">();
-      LibXR::STDIO::Printf<"  cali <标记尺寸mm> <列数> <行数>  例：cali 25mm 8 6\r\n">();
-      LibXR::STDIO::Printf<"  cali status\r\n">();
-      LibXR::STDIO::Printf<"  cali save\r\n">();
-      LibXR::STDIO::Printf<"  cali stop\r\n">();
       return 0;
-    }
-    else if (strcmp(argv[1], "cali") == 0)
-    {
-      if (argc == 5)
-      {
-        int cols = 0;
-        int rows = 0;
-        if (!ParsePositiveIntArg(argv[3], cols) ||
-            !ParsePositiveIntArg(argv[4], rows))
-        {
-          LibXR::STDIO::Printf<"标定板列数和行数必须是正整数：cols=%s rows=%s\r\n">(
-              argv[3], argv[4]);
-          return -1;
-        }
-        return self->calibration_.Start(argv[2], cols, rows, self->name_) ? 0 : -1;
-      }
-
-      if (argc == 2 || (argc == 3 && strcmp(argv[2], "status") == 0))
-      {
-        const std::string status = self->calibration_.StatusString();
-        LibXR::STDIO::Printf<"%s\r\n">(status.c_str());
-        return 0;
-      }
-
-      if (argc == 3 && strcmp(argv[2], "save") == 0)
-      {
-        if (self->calibration_.SaveAndStop())
-        {
-          std::exit(EXIT_SUCCESS);
-        }
-        return -1;
-      }
-
-      if (argc == 3 && strcmp(argv[2], "stop") == 0)
-      {
-        self->calibration_.Stop();
-        return 0;
-      }
     }
     else if (argc == 3)
     {
@@ -431,6 +342,4 @@ class CameraBase
   LibXR::Topic imu_topic_;
   ImageFrame* writable_image_{nullptr};
   ImageCommitCallback image_commit_callback_{};
-  CameraBaseCalibration<CameraInfoV> calibration_{};
-  CameraBaseRecording<CameraInfoV> recording_{};
 };
