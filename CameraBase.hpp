@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 相机基础类型、像素编码和图像/IMU 同步 ABI
+module_description: 相机基础类型、像素编码和图像/IMU 数据结构
 constructor_args: []
 template_args: []
 required_hardware: []
@@ -27,7 +27,10 @@ depends: []
 
 /**
  * @class CameraTypes
- * @brief 相机静态类型定义容器。
+ * @brief 相机相关的纯类型定义容器。
+ *
+ * 本类不保存运行时状态。视觉链路中各模块通过这些类型共享图像像素格式、
+ * CameraInfo 内参和同步 IMU 数据格式。
  */
 class CameraTypes
 {
@@ -35,6 +38,9 @@ class CameraTypes
   /**
    * @enum Encoding
    * @brief 图像像素编码格式。
+   *
+   * 多字节通道值使用目标平台原生字节序。`step` 字段负责描述每行实际字节数，
+   * 因此消费者不能从 `width` 和 `Encoding` 反推出行跨度。
    */
   enum Encoding : uint8_t
   {
@@ -63,6 +69,9 @@ class CameraTypes
   /**
    * @enum DistortionModel
    * @brief 相机畸变模型。
+   *
+   * 枚举值用于解释 `CameraInfo::distortion_coefficients` 的含义。当前 PnP
+   * 直通路径只消费 pinhole 常用模型，其它模型需要调用方先完成去畸变。
    */
   enum class DistortionModel : uint8_t
   {
@@ -81,18 +90,21 @@ class CameraTypes
   /**
    * @struct CameraInfo
    * @brief 编译期静态相机描述。
+   *
+   * 该结构作为模板参数在视觉模块间传播，所有数组均按行优先存储。这里不携带
+   * 手眼外参、坐标系固定旋转或运行时采集参数；这些职责属于上层视觉模块。
    */
   struct CameraInfo
   {
-    uint32_t width{};  ///< 图像宽度，单位像素。
+    uint32_t width{};   ///< 图像宽度，单位像素。
     uint32_t height{};  ///< 图像高度，单位像素。
-    uint32_t step{};  ///< 每行字节数，即 stride。
-    Encoding encoding{};  ///< 像素编码格式。
-    std::array<double, 9> camera_matrix;  ///< 3x3 相机内参矩阵 K，按行优先存储。
-    DistortionModel distortion_model{};  ///< 畸变模型类型。
+    uint32_t step{};    ///< 每行字节数，即 stride；不是每行像素数。
+    Encoding encoding{};  ///< 像素编码格式，决定 `ImageFrame::data` 的解释方式。
+    std::array<double, 9> camera_matrix;  ///< 3x3 相机内参矩阵 K，row-major。
+    DistortionModel distortion_model{};   ///< 畸变模型类型。
     std::array<double, 14> distortion_coefficients;  ///< 畸变参数，布局跟随 ROS CameraInfo。
-    std::array<double, 9> rectification_matrix;  ///< 3x3 校正旋转矩阵 R，按行优先存储。
-    std::array<double, 12> projection_matrix;  ///< 3x4 投影矩阵 P，按行优先存储。
+    std::array<double, 9> rectification_matrix;      ///< 3x3 校正旋转矩阵 R，row-major。
+    std::array<double, 12> projection_matrix;        ///< 3x4 投影矩阵 P，row-major。
   };
 
   /**
@@ -111,6 +123,9 @@ class CameraTypes
 
   /**
    * @brief 按当前静态相机模型生成 PnP 所需的固定畸变系数描述。
+   *
+   * @param info 编译期或运行期可见的相机静态描述。
+   * @return 固定长度畸变系数和调用方处理建议。
    *
    * @note 当前只直接支持 OpenCV 常用 pinhole / rational 两类输入。
    *       其他模型后续应先做去畸变，再按无畸变 pinhole 进入 PnP。
@@ -165,56 +180,72 @@ class CameraTypes
 
 /**
  * @class CameraBase
- * @brief 编译期绑定相机静态信息的基类。
+ * @brief 编译期绑定相机静态信息的相机生产者基类。
+ *
+ * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充
+ * `ImageFrame`，其他模块通过 `RegisterImageSink()` 提供可写槽位并接收图像。
+ * 本类不负责记录、标定、预览、图像同步或坐标系转换。
+ *
+ * @tparam CameraInfoV 编译期相机内参、分辨率和像素格式描述。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class CameraBase
 {
  public:
-  using Encoding = CameraTypes::Encoding;
-  using DistortionModel = CameraTypes::DistortionModel;
-  using CameraInfo = CameraTypes::CameraInfo;
+  using Encoding = CameraTypes::Encoding;  ///< 像素编码枚举的局部别名。
+  using DistortionModel = CameraTypes::DistortionModel;  ///< 畸变模型枚举的局部别名。
+  using CameraInfo = CameraTypes::CameraInfo;  ///< 静态相机描述结构的局部别名。
+  /// 图像帧对象和像素负载的最小对齐字节数。
   static constexpr std::size_t image_alignment = 64;
 
-  // 这一份静态相机描述会被整条视觉链共享，后续模块可直接把分辨率、
-  // 内参、畸变模型当作编译期常量使用。
+  /// 整条视觉链共享的编译期相机描述。
   static inline constexpr CameraInfo camera_info = CameraInfoV;
+  /// 单帧图像负载字节数，等于 `CameraInfo::step * CameraInfo::height`。
   static constexpr std::size_t image_bytes =
       static_cast<std::size_t>(camera_info.step) * static_cast<std::size_t>(camera_info.height);
 
   /**
    * @struct ImageFrame
    * @brief 固定尺寸的图像帧载荷。
+   *
+   * `data` 按 `CameraInfo::encoding` 和 `CameraInfo::step` 解释。生产者只能在当前
+   * writable slot 生命周期内写入该对象；调用 `CommitImage()` 后不得继续访问旧槽位。
    */
   struct alignas(image_alignment) ImageFrame
   {
-    LibXR::MicrosecondTimestamp timestamp_us;  ///< 图像传感器侧时间戳，单位微秒。
-    alignas(image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节负载。
+    LibXR::MicrosecondTimestamp timestamp_us;  ///< 图像采集时间戳，单位微秒，语义由具体相机源定义。
+    alignas(image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
   };
 
   /**
    * @struct ImuStamped
-   * @brief 与图像同步搬运的位姿与惯导采样。
+ * @brief 与图像同步搬运的位姿与惯导采样。
+   *
+   * `CameraBase` 只负责发布该数据；同步、插值和坐标系定义由生成该数据的模块保证。
    */
   struct ImuStamped
   {
-    LibXR::MicrosecondTimestamp timestamp_us;  ///< 对应图像的传感器侧时间戳，单位微秒。
-    std::array<float, 4> rotation_wxyz;  ///< 姿态四元数，顺序为 wxyz。
-    std::array<float, 3> translation_xyz;  ///< 相机平移，单位米。
-    std::array<float, 3> angular_velocity_xyz;  ///< 角速度，单位 rad/s。
-    std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
+    LibXR::MicrosecondTimestamp timestamp_us;  ///< 同步后时间戳，单位微秒。
+    std::array<float, 4> rotation_wxyz;        ///< 姿态四元数，顺序为 wxyz。
+    std::array<float, 3> translation_xyz;      ///< 平移，单位米；无平移来源时置零。
+    std::array<float, 3> angular_velocity_xyz;      ///< 角速度，单位 rad/s。
+    std::array<float, 3> linear_acceleration_xyz;   ///< 线加速度，单位 m/s^2。
   };
 
-  /// 图像生产者提交一帧后，由 sink 返回下一个可写槽位。
+  /**
+   * @brief 图像生产者提交一帧后由 sink 返回下一个可写槽位的回调。
+   *
+   * 回调参数为输出引用：sink 必须把下一帧可写的 `ImageFrame*` 写回该引用。
+   */
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
-  // 共享图像和 imu 都会跨模块搬运，这里只保留真正影响 ABI 的约束。
+  /// 时间戳必须保持 64-bit 标准布局。
   static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
-                "CameraBase timestamp ABI must stay 64-bit");
+                "CameraBase timestamp must stay 64-bit");
   static_assert(alignof(LibXR::MicrosecondTimestamp) == alignof(uint64_t),
-                "CameraBase timestamp ABI alignment changed");
+                "CameraBase timestamp alignment changed");
   static_assert(std::is_standard_layout_v<LibXR::MicrosecondTimestamp>,
-                "CameraBase timestamp wrapper must stay standard layout");
+                "CameraBase timestamp type must stay standard layout");
   static_assert(camera_info.width > 0, "CameraBase requires non-zero width");
   static_assert(camera_info.height > 0, "CameraBase requires non-zero height");
   static_assert(camera_info.step > 0, "CameraBase requires non-zero step");
@@ -228,8 +259,16 @@ class CameraBase
   static_assert(alignof(ImageFrame) >= image_alignment,
                 "CameraBase::ImageFrame alignment is too small");
   static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
-                "CameraBase::ImageFrame image payload must stay aligned");
+                "CameraBase::ImageFrame image data must stay aligned");
 
+  /**
+   * @brief 构造相机基础对象并注册调试命令文件。
+   *
+   * @param hw 硬件容器，必须包含名为 `ramfs` 的 `LibXR::RamFS`。
+   * @param name 相机实例名，同时作为 RamFS 命令文件名。
+   * @param image_topic_name 图像逻辑 topic 名称。
+   * @param imu_topic_name 同步 IMU topic 名称，`PublishImu()` 会发布到该 topic。
+   */
   CameraBase(LibXR::HardwareContainer& hw, std::string_view name = "camera",
              std::string_view image_topic_name = "camera_image",
              std::string_view imu_topic_name = "camera_imu")
@@ -242,24 +281,71 @@ class CameraBase
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
+  /**
+   * @brief 虚析构，允许通过基类指针释放具体相机实现。
+   */
   virtual ~CameraBase() = default;
 
+  /**
+   * @brief 设置曝光参数。
+   *
+   * @param exposure 具体单位由相机实现定义，HikCamera 使用微秒。
+   */
   virtual void SetExposure(double exposure) = 0;
+
+  /**
+   * @brief 设置增益参数。
+   *
+   * @param gain 具体单位和量纲由相机实现定义。
+   */
   virtual void SetGain(double gain) = 0;
 
+  /**
+   * @brief 返回相机实例名视图。
+   */
   std::string_view NameView() const { return name_; }
+
+  /**
+   * @brief 返回以空字符结尾的相机实例名。
+   */
   const char* Name() const { return name_.c_str(); }
 
+  /**
+   * @brief 返回图像逻辑 topic 名称视图。
+   */
   std::string_view ImageTopicNameView() const { return image_topic_name_; }
+
+  /**
+   * @brief 返回以空字符结尾的图像逻辑 topic 名称。
+   */
   const char* ImageTopicName() const { return image_topic_name_.c_str(); }
 
+  /**
+   * @brief 返回同步 IMU topic 名称视图。
+   */
   std::string_view ImuTopicNameView() const { return imu_topic_name_; }
+
+  /**
+   * @brief 返回以空字符结尾的同步 IMU topic 名称。
+   */
   const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
 
-  /// 发布已经由同步模块对齐完成的 IMU 包。
+  /**
+   * @brief 发布同步 IMU 数据。
+   *
+   * @param imu 标准布局 IMU 载荷，会按 `imu_topic_name` 发布。
+   */
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
-  /// 注册唯一图像 sink；具体相机只写入当前租借槽位，不拥有后级队列。
+  /**
+   * @brief 注册唯一图像 sink。
+   *
+   * @param initial_image 首个可写图像槽位，必须非空。
+   * @param commit_callback 提交当前帧并返回下一个可写槽位的回调。
+   * @return 注册成功返回 true；参数非法或重复注册返回 false。
+   *
+   * 具体相机只写入当前可写槽位，不拥有图像队列。当前实现只允许注册一个 sink。
+   */
   bool RegisterImageSink(ImageFrame* initial_image, ImageCommitCallback commit_callback)
   {
     if (initial_image == nullptr || commit_callback.Empty())
@@ -278,13 +364,28 @@ class CameraBase
     return true;
   }
 
+  /**
+   * @brief 查询图像 sink 是否已经可用。
+   *
+   * @return 已注册 commit 回调且当前可写槽位非空时返回 true。
+   */
   bool ImageSinkReady() const
   {
     return !image_commit_callback_.Empty() && writable_image_ != nullptr;
   }
 
+  /**
+   * @brief 获取当前可写图像槽位。
+   *
+   * @return sink 未就绪时返回 nullptr；否则返回生产者可写入的 `ImageFrame`。
+   */
   ImageFrame* GetWritableImage() { return ImageSinkReady() ? writable_image_ : nullptr; }
 
+  /**
+   * @brief 提交当前可写图像并切换到 sink 返回的下一槽位。
+   *
+   * @return 提交成功且获得下一可写槽位时返回 true。
+   */
   bool CommitImage()
   {
     if (!ImageSinkReady() || image_commit_callback_.Empty())
@@ -305,7 +406,14 @@ class CameraBase
     return true;
   }
 
-  // 调试/bring-up 阶段的命令入口。
+  /**
+   * @brief RamFS 调试命令入口。
+   *
+   * @param self 当前相机实例。
+   * @param argc 参数个数。
+   * @param argv 参数数组，支持 `set_exposure` 和 `set_gain`。
+   * @return 命令成功返回 0，未知命令返回 -1。
+   */
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
     if (argc == 1)
@@ -335,11 +443,11 @@ class CameraBase
   }
 
  private:
-  std::string name_;
-  std::string image_topic_name_;
-  std::string imu_topic_name_;
-  LibXR::RamFS::File cmd_file_;
-  LibXR::Topic imu_topic_;
-  ImageFrame* writable_image_{nullptr};
-  ImageCommitCallback image_commit_callback_{};
+  std::string name_;  ///< 相机实例名和 RamFS 命令文件名。
+  std::string image_topic_name_;  ///< 图像逻辑 topic 名称。
+  std::string imu_topic_name_;    ///< `PublishImu()` 发布同步 IMU 的 topic 名称。
+  LibXR::RamFS::File cmd_file_;   ///< 曝光/增益调试命令入口。
+  LibXR::Topic imu_topic_;        ///< 同步 IMU 发布 topic。
+  ImageFrame* writable_image_{nullptr};  ///< 当前可写图像槽位。
+  ImageCommitCallback image_commit_callback_{};  ///< 提交图像并换取下一槽位的回调。
 };

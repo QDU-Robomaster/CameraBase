@@ -1,73 +1,103 @@
 # CameraBase
 
-`CameraBase` 是当前 Webots/Linux 自瞄链路里的相机 ABI 基线。
+CameraBase 提供相机模块共用的 C++ 类型。
 
-它本身不实现具体驱动，只负责定义：
+它不打开相机，不分配图像缓存。
 
-- 编译期静态相机信息
-- 图像帧和同步后 IMU 的数据结构
-- 图像 sink 的注册与提交边界
+## 类型
 
-## 当前职责
+`CameraTypes::CameraInfo` 描述一台相机：
 
-- `CameraTypes::CameraInfo`
-  - 编译期静态相机描述
-  - 包含分辨率、步长、编码、内参、畸变、校正矩阵、投影矩阵
-- `CameraBase<Info>::ImageFrame`
-  - 固定尺寸图像载荷
-  - 供具体相机模块直接写入，再交给后续共享图像发布环节
-- `CameraBase<Info>::ImuStamped`
-  - 最终对下游发布的同步后 IMU 数据
-- 图像 sink API
-  - `RegisterImageSink(...)`
-  - `ImageSinkReady()`
-  - `GetWritableImage()`
-  - `CommitImage()`
+- `width`：图像宽度，单位像素
+- `height`：图像高度，单位像素
+- `step`：每行字节数
+- `encoding`：像素格式
+- `camera_matrix`：3x3 内参矩阵，按行存储
+- `distortion_model`：畸变模型
+- `distortion_coefficients`：畸变参数
+- `rectification_matrix`：3x3 校正矩阵，按行存储
+- `projection_matrix`：3x4 投影矩阵，按行存储
 
-## 模块边界
+`CameraBase<Info>::ImageFrame` 表示一帧图像：
 
-- `CameraBase<Info>`
-  - 拥有类型定义、sink 边界和同步后 IMU 发布 helper
-- 具体相机模块，例如 `WebotsCamera<Info>`
-  - 发布原始传感器数据
-  - 把图像写进 `ImageFrame`
-  - 调用 `CommitImage()`
-- `CameraFrameSync<Info>`
-  - 承接图像 lease
-  - 处理原始 `gyro / accl / quat`，并负责对齐
-  - 发布同步后的 `ImuStamped`
-- `VisionCapture<Info>`
-  - 在 `CameraFrameSync` 后消费同步图像和同步 IMU
-  - 负责内录、标定板检测、preview、相机内参采集和手眼标定采集
+- `timestamp_us`：图像时间戳，单位微秒
+- `data`：固定大小图像数据，大小为 `Info.step * Info.height`
 
-## 同步相关约定
+`CameraBase<Info>::ImuStamped` 表示一帧同步 IMU 数据：
 
-- 原始 `gyro / accl / quat` 的采样时刻由发布端通过 Topic timestamp 携带；
-  `CameraBase` 不再为三路原始传感器定义额外 wrapper，也不保留 `seq/id`。
-- `ImuStamped / ImageFrame` 的 `timestamp_us` 统一使用
-  `LibXR::MicrosecondTimestamp` 表达，ABI 仍保持 64 位微秒时间戳。
-- `ImageFrame::timestamp_us` 是图像传感器侧时间戳；同步后的
-  `ImuStamped::timestamp_us` 使用对应图像的传感器侧时间戳。
-- 原始 IMU 时间戳只保证在 IMU 数据域内部可比较，不能直接把图像域时间戳和
-  IMU 域时间戳拿来做跨域绝对值匹配。
-- 跨域同步关系应先通过专门的同步策略锁定，再在 IMU 域内使用 `offset`
-  推导最终样本。
-- 相机触发同步命令不属于 `CameraBase`。实机链路应使用 `CameraSync::SyncCommand`
-  作为跨端 payload，并通过专门的同步 topic 下发。
+- `timestamp_us`：时间戳，单位微秒
+- `rotation_wxyz`：四元数，顺序为 `w, x, y, z`
+- `translation_xyz`：平移，单位米
+- `angular_velocity_xyz`：角速度，单位 `rad/s`
+- `linear_acceleration_xyz`：线加速度，单位 `m/s^2`
 
-## 采集和标定
+## 相机信息检查
 
-`CameraBase` 不再提供内录或在线标定命令。需要采集同步图像、同步 IMU、
-标定板检测结果或标定数据集时，在 `CameraFrameSync` 后实例化 `VisionCapture`。
-这样 CameraBase 不需要依赖 OpenCV，也不会在标定期间截断正常图像发布链路。
+`CameraBase<Info>` 会在编译期检查 `CameraInfo` 是否明显异常。
 
-## 备注
+检查内容包括：
 
-- 图像字节数在编译期由 `CameraInfo.step * CameraInfo.height` 推导。
-- 图像 sink 切槽回调现在使用 `LibXR::Callback<ImageFrame*&>`，
-  不再单独保留裸函数指针 + context。
-- `name / image_topic_name / imu_topic_name` 构造入口使用 `std::string_view`，基类内部
-  自有保存一份，避免派生模块或装配代码传入临时字符串后出现悬空引用。
-- 这个模块刻意把 ABI 保持成固定尺寸 / 标准布局，便于共享内存与 topic 搬运。
-- `CameraTypes::BuildPnPDistCoeffs(...)` 是编译期静态转换 helper。
-  推荐在静态相机信息定义旁直接生成并缓存结果，而不是在运行时反复构造。
+- 图像宽高不能为 0
+- `step` 不能为 0
+- 内参矩阵中的焦距和主点要落在合理范围内
+- `fx / fy` 比例不能明显异常
+- 投影矩阵不能和内参矩阵明显冲突
+
+这些检查只用于发现错误配置，不会修改 `CameraInfo`。
+
+## 图像槽
+
+相机通过外部提供的图像槽写图。
+
+流程是：
+
+1. 其他模块调用 `RegisterImageSink(initial_image, callback)`
+2. 相机调用 `GetWritableImage()`
+3. 相机写入 `timestamp_us` 和 `data`
+4. 相机调用 `CommitImage()`
+5. 回调返回下一帧可写槽位
+
+`CommitImage()` 之后，旧槽位不能继续写。
+
+## 命令
+
+CameraBase 会创建一个 RamFS 命令文件，名字和相机实例名相同。
+
+支持命令：
+
+```text
+set_exposure <值>
+set_gain <值>
+```
+
+单位和范围由具体相机实现决定。
+
+## 如何实现相机
+
+继承 `CameraBase<Info>`，并实现：
+
+```cpp
+void SetExposure(double exposure) override;
+void SetGain(double gain) override;
+```
+
+采集时只写当前可写槽位：
+
+```cpp
+auto* image = GetWritableImage();
+if (image == nullptr) {
+  return;
+}
+
+image->timestamp_us = timestamp;
+// 写入 image->data
+
+CommitImage();
+```
+
+## 说明
+
+- `step` 是字节数，不是像素数
+- `ImageFrame` 和 `ImuStamped` 是标准布局类型
+- CameraBase 只保存当前可写图像指针，不保存队列
+- 相机内参放在 `CameraInfo`，外参不放在这里
