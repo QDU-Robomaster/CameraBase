@@ -17,13 +17,16 @@ depends: []
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "app_framework.hpp"
 #include "logger.hpp"
 #include "message.hpp"
+#include "object_pool.hpp"
 #include "ramfs.hpp"
 
 /**
@@ -139,7 +142,7 @@ class CameraTypes
    * @brief 一帧图像相对原生传感器坐标系的采样关系。
    *
    * `roi_offset_*_native` 和 `sample_phase_*_native` 均使用原生像素中心坐标。
-   * `epoch` 必须非零；是否允许运行期变化由接收图像的 sink 决定。结构按值进入
+   * `epoch` 必须非零；是否允许运行期变化由接收图像的模块决定。结构按值进入
    * `ImageFrame`，可安全跨线程和共享内存。
    */
   struct FrameGeometry
@@ -415,101 +418,292 @@ class CameraTypes
 
 namespace CameraBaseDetail
 {
-enum class ImageSinkRegistrationResult : uint8_t
-{
-  REGISTERED,
-  INVALID_ARGUMENT,
-  ALREADY_REGISTERED,
-};
-
-enum class ImageCommitResult : uint8_t
-{
-  COMMITTED,
-  NOT_READY,
-  NO_WRITABLE_IMAGE,
-};
-
 /**
- * @brief 单生产者图像槽位交接状态机。
+ * @brief 进程内共享所有权对象池。
  *
- * CameraBase 在回调执行前撤销生产者的写权限。sink 必须同步处理提交，并返回一块
- * 独占可写槽位；若本帧未发布，可以返回刚提交的原槽位表示丢弃并复用。
- * `Register()` 只由初始化线程调用一次；发布就绪后仅一个采集线程可调用
- * `WritableImage()` 和 `Commit()`，其他线程最多查询 `Ready()`。
+ * 底层 `MPMCObjectPool` 继续负责固定槽位的分配和回收；每个已借出槽位由一个
+ * `SharedHandle` 独占或共享持有。复制 handle 增加原子引用计数，移动只转移本地所有权，
+ * 最后一个 handle 析构时才把底层独占 pool handle 归还。
  *
- * @tparam Frame 带有 `publish_token` 字段的图像帧类型。
+ * @tparam Data 槽位中的对象类型。
+ * @tparam SlotCount 固定槽位数。
  */
-template <typename Frame>
-class ImageSinkState
+template <typename Data, std::size_t SlotCount>
+class SharedObjectPool
 {
  public:
-  using CommitCallback = LibXR::Callback<Frame*&>;
+  static_assert(SlotCount > 1U,
+                "MPMC-backed SharedObjectPool requires at least two slots");
 
-  ImageSinkState() = default;
-  ImageSinkState(const ImageSinkState&) = delete;
-  ImageSinkState& operator=(const ImageSinkState&) = delete;
-  ImageSinkState(ImageSinkState&&) = delete;
-  ImageSinkState& operator=(ImageSinkState&&) = delete;
+ private:
+  using ObjectPool = LibXR::MPMCObjectPool<Data>;
+  using UniqueHandle = typename ObjectPool::Handle;
 
-  [[nodiscard]] ImageSinkRegistrationResult Register(Frame* initial_image,
-                                                     CommitCallback callback)
+  struct Control
   {
-    if (initial_image == nullptr || callback.Empty())
+    std::atomic<uint32_t> references{0U};
+    std::atomic<uint64_t> generation{0U};
+  };
+
+ public:
+  /**
+   * @brief 一个池槽位的可复制共享所有权句柄。
+   *
+   * 句柄只在当前进程内有效。复制构造和复制赋值会增加引用计数；析构和 `Reset()` 会
+   * 减少引用计数。所有副本访问同一个 `Data`；并发写入必须由调用方同步。调用方不得
+   * 让 handle 的生命周期超过所属 `SharedObjectPool`。
+   */
+  class SharedHandle
+  {
+   public:
+    SharedHandle() = default;
+
+    SharedHandle(const SharedHandle& other) { RetainFrom(other); }
+
+    SharedHandle& operator=(const SharedHandle& other)
     {
-      return ImageSinkRegistrationResult::INVALID_ARGUMENT;
-    }
-    if (!commit_callback_.Empty())
-    {
-      return ImageSinkRegistrationResult::ALREADY_REGISTERED;
+      if (SameOwnership(other))
+      {
+        return *this;
+      }
+
+      SharedHandle retained(other);
+      *this = std::move(retained);
+      return *this;
     }
 
-    initial_image->publish_token = 0U;
-    writable_image_ = initial_image;
-    commit_callback_ = callback;
-    ready_.store(true, std::memory_order_release);
-    return ImageSinkRegistrationResult::REGISTERED;
+    SharedHandle(SharedHandle&& other) noexcept
+        : pool_(std::exchange(other.pool_, nullptr)),
+          slot_index_(std::exchange(other.slot_index_, 0U)),
+          generation_(std::exchange(other.generation_, 0U))
+    {
+    }
+
+    SharedHandle& operator=(SharedHandle&& other) noexcept
+    {
+      if (this == &other)
+      {
+        return *this;
+      }
+
+      Reset();
+      pool_ = std::exchange(other.pool_, nullptr);
+      slot_index_ = std::exchange(other.slot_index_, 0U);
+      generation_ = std::exchange(other.generation_, 0U);
+      return *this;
+    }
+
+    ~SharedHandle() { Reset(); }
+
+    [[nodiscard]] bool Valid() const noexcept { return pool_ != nullptr; }
+
+    [[nodiscard]] Data* Get() noexcept
+    {
+      return Valid() ? &pool_->Get(slot_index_, generation_) : nullptr;
+    }
+
+    [[nodiscard]] const Data* Get() const noexcept
+    {
+      return Valid() ? &pool_->Get(slot_index_, generation_) : nullptr;
+    }
+
+    [[nodiscard]] Data* operator->() noexcept { return Get(); }
+    [[nodiscard]] const Data* operator->() const noexcept { return Get(); }
+
+    [[nodiscard]] Data& operator*() noexcept
+    {
+      ASSERT(Valid());
+      return *Get();
+    }
+
+    [[nodiscard]] const Data& operator*() const noexcept
+    {
+      ASSERT(Valid());
+      return *Get();
+    }
+
+    /**
+     * @brief 返回当前引用计数的诊断快照。
+     *
+     * 其他线程可在返回后立即复制或释放句柄，调用方不得用该值决定是否拥有独占访问权。
+     */
+    [[nodiscard]] uint32_t UseCount() const noexcept
+    {
+      return Valid() ? pool_->UseCount(slot_index_, generation_) : 0U;
+    }
+
+    void Reset() noexcept
+    {
+      if (!Valid())
+      {
+        return;
+      }
+
+      SharedObjectPool* pool = std::exchange(pool_, nullptr);
+      const uint32_t slot_index = std::exchange(slot_index_, 0U);
+      const uint64_t generation = std::exchange(generation_, 0U);
+      pool->Release(slot_index, generation);
+    }
+
+   private:
+    friend class SharedObjectPool<Data, SlotCount>;
+
+    SharedHandle(SharedObjectPool* pool, uint32_t slot_index, uint64_t generation)
+        : pool_(pool), slot_index_(slot_index), generation_(generation)
+    {
+    }
+
+    [[nodiscard]] bool SameOwnership(const SharedHandle& other) const noexcept
+    {
+      return pool_ == other.pool_ && slot_index_ == other.slot_index_ &&
+             generation_ == other.generation_;
+    }
+
+    void RetainFrom(const SharedHandle& other)
+    {
+      if (!other.Valid())
+      {
+        return;
+      }
+
+      const bool retained = other.pool_->Retain(other.slot_index_, other.generation_);
+      ASSERT(retained);
+      pool_ = other.pool_;
+      slot_index_ = other.slot_index_;
+      generation_ = other.generation_;
+    }
+
+    SharedObjectPool* pool_{nullptr};
+    uint32_t slot_index_{0U};
+    uint64_t generation_{0U};
+  };
+
+  SharedObjectPool() : object_pool_(SlotCount) {}
+
+  SharedObjectPool(const SharedObjectPool&) = delete;
+  SharedObjectPool& operator=(const SharedObjectPool&) = delete;
+  SharedObjectPool(SharedObjectPool&&) = delete;
+  SharedObjectPool& operator=(SharedObjectPool&&) = delete;
+
+  /**
+   * @brief 获取一个引用计数初值为一的共享句柄。
+   * @return 成功返回 `OK`，没有空闲槽位返回底层 pool 的 `EMPTY`。
+   */
+  [[nodiscard]] LibXR::ErrorCode Acquire(SharedHandle& handle)
+  {
+    if (handle.Valid())
+    {
+      return LibXR::ErrorCode::STATE_ERR;
+    }
+
+    UniqueHandle unique_handle;
+    const LibXR::ErrorCode result = object_pool_.Acquire(unique_handle);
+    if (result != LibXR::ErrorCode::OK)
+    {
+      return result;
+    }
+
+    const uint32_t slot_index = unique_handle.Index();
+    Control& control = controls_[slot_index];
+    ASSERT(control.references.load(std::memory_order_acquire) == 0U);
+    ASSERT(!owners_[slot_index].has_value());
+
+    uint64_t generation =
+        control.generation.fetch_add(1U, std::memory_order_acq_rel) + 1U;
+    if (generation == 0U)
+    {
+      generation = control.generation.fetch_add(1U, std::memory_order_acq_rel) + 1U;
+    }
+
+    owners_[slot_index].emplace(std::move(unique_handle));
+    control.references.store(1U, std::memory_order_release);
+    handle = SharedHandle(this, slot_index, generation);
+    return LibXR::ErrorCode::OK;
   }
 
-  [[nodiscard]] bool Ready() const noexcept
+  [[nodiscard]] std::size_t Available() const noexcept
   {
-    return ready_.load(std::memory_order_acquire);
-  }
-
-  [[nodiscard]] Frame* WritableImage() noexcept
-  {
-    return Ready() ? writable_image_ : nullptr;
-  }
-
-  [[nodiscard]] ImageCommitResult Commit()
-  {
-    if (!Ready())
-    {
-      return ImageCommitResult::NOT_READY;
-    }
-
-    Frame* committed_image = writable_image_;
-    ready_.store(false, std::memory_order_release);
-    writable_image_ = nullptr;
-    committed_image->publish_token = 0U;
-
-    Frame* next_image = nullptr;
-    commit_callback_.Run(false, next_image);
-    if (next_image == nullptr)
-    {
-      return ImageCommitResult::NO_WRITABLE_IMAGE;
-    }
-
-    // 原槽丢帧复用和新槽租出都从生产者持有状态开始。
-    next_image->publish_token = 0U;
-    writable_image_ = next_image;
-    ready_.store(true, std::memory_order_release);
-    return ImageCommitResult::COMMITTED;
+    return object_pool_.EmptySize();
   }
 
  private:
-  Frame* writable_image_{nullptr};
-  CommitCallback commit_callback_{};
-  std::atomic<bool> ready_{false};
+  [[nodiscard]] bool Retain(uint32_t slot_index, uint64_t generation) noexcept
+  {
+    ASSERT(slot_index < SlotCount);
+    Control& control = controls_[slot_index];
+
+    while (control.generation.load(std::memory_order_acquire) == generation)
+    {
+      uint32_t references = control.references.load(std::memory_order_acquire);
+      if (references == 0U || references == std::numeric_limits<uint32_t>::max())
+      {
+        return false;
+      }
+      if (control.references.compare_exchange_weak(references, references + 1U,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_acquire))
+      {
+        if (control.generation.load(std::memory_order_acquire) == generation)
+        {
+          return true;
+        }
+
+        ASSERT(!ReleaseReference(slot_index));
+        return false;
+      }
+    }
+    return false;
+  }
+
+  void Release(uint32_t slot_index, uint64_t generation) noexcept
+  {
+    ASSERT(slot_index < SlotCount);
+    ASSERT(controls_[slot_index].generation.load(std::memory_order_acquire) ==
+           generation);
+    if (!ReleaseReference(slot_index))
+    {
+      return;
+    }
+
+    ASSERT(owners_[slot_index].has_value());
+    UniqueHandle unique_handle = std::move(*owners_[slot_index]);
+    owners_[slot_index].reset();
+    // 先清空本槽 owner，再由 Reset() 把索引发布回 MPMC 队列。新的 Acquire()
+    // 在入队完成前不可能取得该索引，因此不会与这里并发改写同一个 optional。
+    unique_handle.Reset();
+  }
+
+  /** @return 当前调用是否释放了最后一个引用。 */
+  [[nodiscard]] bool ReleaseReference(uint32_t slot_index) noexcept
+  {
+    const uint32_t previous =
+        controls_[slot_index].references.fetch_sub(1U, std::memory_order_acq_rel);
+    ASSERT(previous > 0U);
+    return previous == 1U;
+  }
+
+  [[nodiscard]] Data& Get(uint32_t slot_index, uint64_t generation) noexcept
+  {
+    ASSERT(slot_index < SlotCount);
+    ASSERT(controls_[slot_index].generation.load(std::memory_order_acquire) ==
+           generation);
+    ASSERT(controls_[slot_index].references.load(std::memory_order_acquire) > 0U);
+    return object_pool_.UnsafeAt(slot_index);
+  }
+
+  [[nodiscard]] uint32_t UseCount(uint32_t slot_index, uint64_t generation) const noexcept
+  {
+    ASSERT(slot_index < SlotCount);
+    if (controls_[slot_index].generation.load(std::memory_order_acquire) != generation)
+    {
+      return 0U;
+    }
+    return controls_[slot_index].references.load(std::memory_order_acquire);
+  }
+
+  ObjectPool object_pool_;
+  std::array<Control, SlotCount> controls_{};
+  std::array<std::optional<UniqueHandle>, SlotCount> owners_{};
 };
 }  // namespace CameraBaseDetail
 
@@ -517,10 +711,10 @@ class ImageSinkState
  * @class CameraBase
  * @brief 编译期绑定帧存储布局、运行期持有原生标定的相机生产者基类。
  *
- * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充
- * `ImageFrame`，其他模块通过 `RegisterImageSink()` 提供可写槽位并接收图像。
- * 本类不分配图像槽、不保存队列，也不负责记录、标定、预览、图像同步或坐标系转换。
- * sink 回调与 `CommitImage()` 同步执行，是发布前预处理、背压和丢帧决策的唯一边界。
+ * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充本类八槽对象池中的
+ * `ImageFrame`。`CommitImage()` 通过普通 topic 同步发布临时 `SharedFrame` 指针；
+ * 订阅回调复制句柄后可把同一图像槽位交给异步线程，不复制图像字节。
+ * 本类不负责记录、标定、预览、图像同步或坐标系转换。
  *
  * @tparam FrameLayoutV 编译期图像存储容量和像素格式描述。
  */
@@ -551,18 +745,27 @@ class CameraBase
    * writable slot 生命周期内写入该对象；调用 `CommitImage()` 后不得继续访问旧槽位。
    * `timestamp_us` 必须保留源传感器或录制文件的采样时间，不能改写成主机到达、解码、
    * 预处理或发布时间。实时采集应保留设备时钟的采样语义。CameraBase 不比较或重映射
-   * 时间域；重复、回退、回绕或复位由 sink 的同步状态机处理。确定性回放必须保留原始
+   * 时间域；重复、回退、回绕或复位由下游同步状态机处理。确定性回放必须保留原始
    * 顺序和时间，包括原始重复值。
    */
   struct alignas(image_alignment) ImageFrame
   {
     LibXR::MicrosecondTimestamp
         timestamp_us;          ///< 传感器采样时间，单位微秒；不是主机到达或发布时间。
-    uint64_t publish_token{};  ///< sink 分配的进程内发布标识；生产者持有时为 0。
+    uint64_t publish_token{};  ///< 同步阶段分配的进程内标识；生产者持有时为 0。
     FrameGeometry geometry;    ///< 当前像素负载到原生传感器坐标系的映射。
     alignas(image_alignment)
         std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
   };
+
+  /// CameraBase 进程内图像池的固定槽位数。
+  static constexpr std::size_t image_slot_count = 8U;
+  /// CameraBase 自有的共享图像对象池。
+  using ImagePool = CameraBaseDetail::SharedObjectPool<ImageFrame, image_slot_count>;
+  /// 一个图像槽位的可复制进程内共享所有权句柄。
+  using SharedFrame = typename ImagePool::SharedHandle;
+  /// 普通 topic 只在同步回调期间借用该指针，不拥有 `SharedFrame`。
+  using ImageTopicPayload = const SharedFrame*;
 
   /**
    * @struct ImuStamped
@@ -580,16 +783,6 @@ class CameraBase
     std::array<float, 3> angular_velocity_xyz;     ///< 角速度，单位 rad/s。
     std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
   };
-
-  /**
-   * @brief 图像生产者提交一帧后由 sink 返回下一个可写槽位的回调。
-   *
-   * 回调在调用 `CommitImage()` 的生产者线程内同步执行。sink 已持有当前槽位句柄，回调
-   * 参数只用于返回下一帧独占可写的 `ImageFrame*`。发布前预处理必须在回调发起发布前
-   * 完成。没有可发布槽位或预处理拒绝时，sink 可不发布并返回当前槽位表示丢帧复用；
-   * 返回 nullptr 是不可恢复的契约错误，会让生产者保持未就绪。
-   */
-  using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
   /// 时间戳必须保持 64-bit 标准布局。
   static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
@@ -659,9 +852,14 @@ class CameraBase
         image_topic_name_(image_topic_name),
         imu_topic_name_(imu_topic_name),
         cmd_file_(LibXR::RamFS::CreateFile(name_.c_str(), CommandFun, this)),
+        image_topic_(
+            LibXR::Topic::FindOrCreate<ImageTopicPayload>(image_topic_name_.c_str())),
         imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
   {
     ASSERT(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
+    const auto result = image_pool_.Acquire(writable_frame_);
+    ASSERT(result == LibXR::ErrorCode::OK);
+    writable_frame_->publish_token = 0U;
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
@@ -671,10 +869,10 @@ class CameraBase
   CameraBase& operator=(CameraBase&&) = delete;
 
   /**
-   * @brief 仅提供多态类型完整性，不承担 sink 注销或线程停止语义。
+   * @brief 仅提供多态类型完整性，不承担订阅注销或线程停止语义。
    *
-   * CameraBase 与已注册 sink 按进程生命周期使用。析构不是并发边界，调用方不得依赖
-   * 本析构等待回调、回收槽位或终止派生类工作线程。
+   * CameraBase、图像订阅和派生类工作线程按进程生命周期使用。析构不是并发边界，调用
+   * 方必须保证所有 `SharedFrame` 已经释放，不得依赖本析构等待回调或终止工作线程。
    */
   virtual ~CameraBase() = default;
 
@@ -738,71 +936,57 @@ class CameraBase
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
   /**
-   * @brief 注册唯一图像 sink。
+   * @brief 获取生产者当前独占的可写图像槽位。
    *
-   * @param initial_image 首个可写图像槽位，必须非空。
-   * @param commit_callback 提交当前帧并返回下一个可写槽位的回调。
-   * @return 注册成功返回 true；参数非法或重复注册返回 false。
-   *
-   * 具体相机只写入当前可写槽位，不拥有图像队列。当前实现只允许注册一个进程生命周期
-   * sink，不支持注销或替换。注册可发生在采集线程已经开始轮询之后；初始槽位和回调会
-   * 通过 release/acquire 就绪门闩一次性发布。仅初始化线程可调用本方法一次。
+   * 若当前没有写槽位，本方法从八槽池中尝试获取一块。池中所有槽位仍被下游
+   * `SharedFrame` 持有时返回 nullptr；下游释放任一槽位后，后续调用可再次成功。
+   * 本方法和 `CommitImage()` 只能由同一个采集线程调用。
    */
-  bool RegisterImageSink(ImageFrame* initial_image, ImageCommitCallback commit_callback)
+  ImageFrame* GetWritableImage() noexcept
   {
-    const auto result = image_sink_.Register(initial_image, commit_callback);
-    if (result == CameraBaseDetail::ImageSinkRegistrationResult::INVALID_ARGUMENT)
+    if (!writable_frame_.Valid())
     {
-      XR_LOG_ERROR("CameraBase(%s): image sink registration got invalid argument",
-                   name_.c_str());
-      return false;
+      if (image_pool_.Acquire(writable_frame_) != LibXR::ErrorCode::OK)
+      {
+        return nullptr;
+      }
+      writable_frame_->publish_token = 0U;
     }
-    if (result == CameraBaseDetail::ImageSinkRegistrationResult::ALREADY_REGISTERED)
-    {
-      XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_.c_str());
-      return false;
-    }
-    return true;
+    return writable_frame_.Get();
   }
 
   /**
-   * @brief 查询图像 sink 是否已经可用。
+   * @brief 返回当前可立即获取的空闲图像槽位数。
    *
-   * @return 已注册 commit 回调且当前可写槽位非空时返回 true。采集线程可在启动阶段
-   * 轮询该状态；它不代表下游曾成功发布图像。此只读查询可从其他线程调用。
+   * 当前生产者已经持有的可写槽位不计入该值。该值只用于监控，其他线程可能在返回后
+   * 立即释放槽位，因此调用方不得据此代替 `GetWritableImage()` 的结果。
    */
-  bool ImageSinkReady() const noexcept { return image_sink_.Ready(); }
+  [[nodiscard]] std::size_t AvailableImageSlots() const noexcept
+  {
+    return image_pool_.Available();
+  }
 
   /**
-   * @brief 获取当前可写图像槽位。
+   * @brief 发布当前图像并放弃生产者所有权。
    *
-   * @return sink 未就绪时返回 nullptr；否则返回生产者独占写入的 `ImageFrame`。
-   * 注册完成后，本方法和 `CommitImage()` 只能由同一个采集线程调用。
-   */
-  ImageFrame* GetWritableImage() noexcept { return image_sink_.WritableImage(); }
-
-  /**
-   * @brief 提交当前可写图像并切换到 sink 返回的下一槽位。
+   * topic payload 是指向栈上 `SharedFrame` 的临时借用指针，只在 `Publish()` 的同步
+   * 回调期间有效。需要跨越回调继续使用图像的订阅者必须在回调内复制 `SharedFrame`，
+   * 再把该副本移动到稳定的异步工作槽位；不得保存裸指针，也不得用
+   * `SyncSubscriber` 或 `QueuedSubscriber` 承担图像所有权。回调应只做
+   * retain/enqueue，重处理留在工作线程。最后一个句柄析构后，槽位自动返回池中。
    *
-   * 回调执行期间生产者写权限被撤销。返回 true 只表示回调已完成且获得下一写租约，
-   * 不表示当前帧已发布或被下游接受；发布、背压和丢帧结果由 sink 自己记录。回调可以
-   * 查询 `ImageSinkReady()`，但不得重新注册 sink、递归提交或生产下一帧。
-   *
-   * @return 获得下一可写槽位时返回 true；未注册或回调返回 nullptr 时返回 false。
+   * @return 当前存在可写帧并完成同步发布时返回 true；没有可写帧时返回 false。
    */
   bool CommitImage()
   {
-    const auto result = image_sink_.Commit();
-    if (result == CameraBaseDetail::ImageCommitResult::NOT_READY)
+    if (!writable_frame_.Valid())
     {
       return false;
     }
-    if (result == CameraBaseDetail::ImageCommitResult::NO_WRITABLE_IMAGE)
-    {
-      XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image",
-                   name_.c_str());
-      return false;
-    }
+
+    SharedFrame published_frame = std::move(writable_frame_);
+    ImageTopicPayload message = &published_frame;
+    image_topic_.Publish(message);
     return true;
   }
 
@@ -848,6 +1032,8 @@ class CameraBase
   std::string image_topic_name_;         ///< 图像逻辑 topic 名称。
   std::string imu_topic_name_;           ///< `PublishImu()` 发布同步 IMU 的 topic 名称。
   LibXR::RamFS::File cmd_file_;          ///< 曝光/增益调试命令入口。
+  LibXR::Topic image_topic_;             ///< 临时 `SharedFrame` 指针发布 topic。
   LibXR::Topic imu_topic_;               ///< 同步 IMU 发布 topic。
-  CameraBaseDetail::ImageSinkState<ImageFrame> image_sink_;  ///< 图像槽位交接状态。
+  ImagePool image_pool_;                 ///< CameraBase 自有八槽图像池。
+  SharedFrame writable_frame_;           ///< 生产者当前独占的可写槽位。
 };

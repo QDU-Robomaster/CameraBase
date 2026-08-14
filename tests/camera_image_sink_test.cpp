@@ -1,17 +1,20 @@
 #include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "CameraBase.hpp"
+#include "libxr.hpp"
 
 namespace
 {
 constexpr CameraTypes::FrameLayout kLayout{2, 2, 6, CameraTypes::Encoding::BGR8};
 using Camera = CameraBase<kLayout>;
 using Frame = Camera::ImageFrame;
-using Sink = CameraBaseDetail::ImageSinkState<Frame>;
+using Pool = CameraBaseDetail::SharedObjectPool<Frame, 2U>;
+using Handle = Pool::SharedHandle;
 
 void Expect(bool condition, const char* label)
 {
@@ -22,175 +25,233 @@ void Expect(bool condition, const char* label)
   }
 }
 
-struct CommitContext
+void TestCopyRetainsOneSlot()
 {
-  Sink* sink{};
-  Frame* committed{};
-  Frame* next{};
-  uint64_t assigned_token{};
-  uint64_t token_on_entry{};
+  Pool pool;
+  Handle first;
+  Expect(pool.Available() == 2U, "new pool must expose every slot");
+  Expect(pool.Acquire(first) == LibXR::ErrorCode::OK, "first acquire must succeed");
+  Expect(first.Valid(), "acquired handle must be valid");
+  Expect(first.UseCount() == 1U, "new handle must own one reference");
+  Expect(pool.Acquire(first) == LibXR::ErrorCode::STATE_ERR,
+         "acquire must reject an already valid output handle");
+
+  Frame* frame_address = first.Get();
+  first->data[0] = 37U;
+  Handle second = first;
+  Expect(first.UseCount() == 2U, "copy must increment the reference count");
+  Expect(second.Get() == frame_address, "copy must refer to the same image bytes");
+  Expect(second->data[0] == 37U, "copy must observe the same image bytes");
+
+  second.Reset();
+  Expect(first.UseCount() == 1U, "reset must decrement the reference count");
+  Expect(pool.Available() == 1U, "slot must remain borrowed while one owner exists");
+  first.Reset();
+  Expect(pool.Available() == 2U, "last reset must return the slot");
+}
+
+void TestPoolExhaustionAndRecovery()
+{
+  Pool pool;
+  Handle first;
+  Handle second;
+  Handle unavailable;
+  Expect(pool.Acquire(first) == LibXR::ErrorCode::OK, "first slot must be available");
+  Expect(pool.Acquire(second) == LibXR::ErrorCode::OK, "second slot must be available");
+  Expect(pool.Acquire(unavailable) == LibXR::ErrorCode::EMPTY,
+         "acquire must report an exhausted pool");
+
+  first.Reset();
+  Expect(pool.Acquire(unavailable) == LibXR::ErrorCode::OK,
+         "released slot must become acquirable again");
+  Expect(unavailable.Get() != nullptr, "recovered handle must expose valid storage");
+}
+
+void TestConcurrentCopiesAndLastRelease()
+{
+  CameraBaseDetail::SharedObjectPool<Frame, 2U> pool;
+  using SingleHandle = CameraBaseDetail::SharedObjectPool<Frame, 2U>::SharedHandle;
+  SingleHandle root;
+  Expect(pool.Acquire(root) == LibXR::ErrorCode::OK,
+         "concurrency test acquire must succeed");
+
+  constexpr std::size_t kThreadCount = 8U;
+  constexpr std::size_t kCopyIterations = 2000U;
+  std::atomic<bool> start{false};
+  std::vector<std::thread> workers;
+  workers.reserve(kThreadCount);
+  for (std::size_t index = 0; index < kThreadCount; ++index)
+  {
+    workers.emplace_back(
+        [owned = SingleHandle(root), &start]() mutable
+        {
+          while (!start.load(std::memory_order_acquire))
+          {
+            std::this_thread::yield();
+          }
+          for (std::size_t iteration = 0; iteration < kCopyIterations; ++iteration)
+          {
+            SingleHandle copy = owned;
+            Expect(copy.Get() == owned.Get(),
+                   "concurrent copy must retain the same slot");
+          }
+        });
+  }
+
+  start.store(true, std::memory_order_release);
+  for (auto& worker : workers)
+  {
+    worker.join();
+  }
+  Expect(root.UseCount() == 1U,
+         "all worker-owned references must be released after join");
+
+  SingleHandle last_owner = std::move(root);
+  std::thread final_releaser([owned = std::move(last_owner)]() mutable
+                             { owned.Reset(); });
+  final_releaser.join();
+  Expect(pool.Available() == 2U,
+         "last destruction on another thread must return the slot");
+}
+
+void TestConcurrentLastReleaseAndReacquire()
+{
+  Pool pool;
+  Handle blocker;
+  Expect(pool.Acquire(blocker) == LibXR::ErrorCode::OK,
+         "reacquire test blocker must acquire one slot");
+
+  constexpr std::size_t kIterations = 64U;
+  for (std::size_t iteration = 0; iteration < kIterations; ++iteration)
+  {
+    Handle retiring;
+    Expect(pool.Acquire(retiring) == LibXR::ErrorCode::OK,
+           "reacquire test must borrow the remaining slot");
+    std::atomic<bool> release{false};
+    std::thread releaser(
+        [owned = std::move(retiring), &release]() mutable
+        {
+          while (!release.load(std::memory_order_acquire))
+          {
+            std::this_thread::yield();
+          }
+          owned.Reset();
+        });
+
+    release.store(true, std::memory_order_release);
+    Handle reacquired;
+    LibXR::ErrorCode result = LibXR::ErrorCode::EMPTY;
+    while ((result = pool.Acquire(reacquired)) == LibXR::ErrorCode::EMPTY)
+    {
+      std::this_thread::yield();
+    }
+    Expect(result == LibXR::ErrorCode::OK,
+           "slot must become acquirable after concurrent last release");
+    releaser.join();
+    reacquired.Reset();
+  }
+
+  blocker.Reset();
+  Expect(pool.Available() == 2U, "reacquire loop must return every slot to the pool");
+}
+
+struct TopicContext
+{
+  Handle retained{};
+  const Frame* frame_address{};
   uint32_t call_count{};
-  bool ready_during_callback{true};
-  Frame* writable_during_callback{};
-  CameraBaseDetail::ImageCommitResult recursive_commit_result{
-      CameraBaseDetail::ImageCommitResult::COMMITTED};
 };
 
-void CommitAdapter(bool, CommitContext* context, Frame*& next_image)
+void RetainFrame(bool, TopicContext* context, const Handle* borrowed)
 {
+  Expect(borrowed != nullptr, "topic callback must receive a borrowed handle pointer");
+  Expect(borrowed->Valid(), "borrowed handle must be valid during callback");
   ++context->call_count;
-  context->ready_during_callback = context->sink->Ready();
-  context->writable_during_callback = context->sink->WritableImage();
-  context->recursive_commit_result = context->sink->Commit();
-  context->token_on_entry = context->committed->publish_token;
-  context->committed->publish_token = context->assigned_token;
-  next_image = context->next;
+  context->frame_address = borrowed->Get();
+  context->retained = *borrowed;
 }
 
-void TestRegistrationPublishesInitialLease()
+void TestTopicCallbackRetainsFrame()
 {
-  Sink sink;
-  Frame initial{};
-  initial.publish_token = 91U;
-  CommitContext context{.sink = &sink, .committed = &initial, .next = &initial};
-  const auto callback = Sink::CommitCallback::Create(CommitAdapter, &context);
+  Pool pool;
+  Handle publisher;
+  Expect(pool.Acquire(publisher) == LibXR::ErrorCode::OK,
+         "topic publisher acquire must succeed");
+  publisher->data[0] = 91U;
+  const Frame* published_address = publisher.Get();
 
-  Expect(sink.Register(nullptr, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::INVALID_ARGUMENT,
-         "null initial image must be rejected");
-  Expect(sink.Register(&initial, {}) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::INVALID_ARGUMENT,
-         "empty callback must be rejected");
-  Expect(sink.Register(&initial, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::REGISTERED,
-         "valid sink registration must succeed");
-  Expect(sink.Ready(), "registered sink must be ready");
-  Expect(sink.WritableImage() == &initial, "initial lease must be published");
-  Expect(initial.publish_token == 0U,
-         "producer-owned initial lease must have token zero");
-  Expect(sink.Register(&initial, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::ALREADY_REGISTERED,
-         "sink registration must be one-shot");
+  using Payload = const Handle*;
+  LibXR::Topic topic(
+      LibXR::Topic::FindOrCreate<Payload>("camera_shared_frame_single_owner_test"));
+  TopicContext context;
+  auto callback = LibXR::Topic::Callback::Create(RetainFrame, &context);
+  topic.RegisterCallback(callback);
+
+  Payload message = &publisher;
+  topic.Publish(message);
+  Expect(context.call_count == 1U, "topic callback must run synchronously");
+  Expect(context.retained.Valid(), "callback copy must retain frame ownership");
+  Expect(context.frame_address == published_address,
+         "topic delivery must not copy image storage");
+  Expect(context.retained->data[0] == 91U, "retained handle must preserve image bytes");
+  Expect(publisher.UseCount() == 2U,
+         "publisher and callback must each own one reference");
+
+  publisher.Reset();
+  Expect(pool.Available() == 1U,
+         "callback owner must keep exactly one pool slot borrowed");
+  Expect(context.retained->data[0] == 91U,
+         "callback owner must outlive the publisher handle");
+  context.retained.Reset();
+  Expect(pool.Available() == 2U, "slot must return after the callback owner releases it");
 }
 
-void TestCommitRotatesLeaseSynchronously()
+void TestMultipleCallbacksShareOneFrame()
 {
-  Sink sink;
-  Frame first{};
-  Frame second{};
-  second.publish_token = 92U;
-  CommitContext context{
-      .sink = &sink,
-      .committed = &first,
-      .next = &second,
-      .assigned_token = 41U,
-  };
-  const auto callback = Sink::CommitCallback::Create(CommitAdapter, &context);
-  Expect(sink.Register(&first, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::REGISTERED,
-         "rotation registration must succeed");
+  Pool pool;
+  Handle publisher;
+  Expect(pool.Acquire(publisher) == LibXR::ErrorCode::OK,
+         "fan-out publisher acquire must succeed");
+  const Frame* published_address = publisher.Get();
 
-  first.publish_token = 99U;
-  Expect(sink.Commit() == CameraBaseDetail::ImageCommitResult::COMMITTED,
-         "commit must acquire the next lease");
-  Expect(context.call_count == 1U, "commit callback must run exactly once");
-  Expect(!context.ready_during_callback,
-         "producer write access must be revoked during callback");
-  Expect(context.writable_during_callback == nullptr,
-         "callback must not observe a writable producer slot");
-  Expect(
-      context.recursive_commit_result == CameraBaseDetail::ImageCommitResult::NOT_READY,
-      "recursive commit must fail without invoking the callback again");
-  Expect(context.token_on_entry == 0U,
-         "CameraBase must clear the producer token before sink publication");
-  Expect(first.publish_token == 41U, "published frame token must remain intact");
-  Expect(second.publish_token == 0U, "next producer lease must have token zero");
-  Expect(sink.WritableImage() == &second, "next lease must become writable");
-}
+  using Payload = const Handle*;
+  LibXR::Topic topic(
+      LibXR::Topic::FindOrCreate<Payload>("camera_shared_frame_fanout_test"));
+  TopicContext first;
+  TopicContext second;
+  auto first_callback = LibXR::Topic::Callback::Create(RetainFrame, &first);
+  auto second_callback = LibXR::Topic::Callback::Create(RetainFrame, &second);
+  topic.RegisterCallback(first_callback);
+  topic.RegisterCallback(second_callback);
 
-void TestDroppedFrameMayReuseCommittedSlot()
-{
-  Sink sink;
-  Frame frame{};
-  CommitContext context{
-      .sink = &sink,
-      .committed = &frame,
-      .next = &frame,
-      .assigned_token = 42U,
-  };
-  const auto callback = Sink::CommitCallback::Create(CommitAdapter, &context);
-  Expect(sink.Register(&frame, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::REGISTERED,
-         "reuse registration must succeed");
-  Expect(sink.Commit() == CameraBaseDetail::ImageCommitResult::COMMITTED,
-         "same-slot drop must still return a writable lease");
-  Expect(context.call_count == 1U, "same-slot callback must run exactly once");
-  Expect(sink.WritableImage() == &frame, "dropped slot must be reusable");
-  Expect(frame.publish_token == 0U, "reused producer slot must clear stale token");
-}
+  Payload message = &publisher;
+  topic.Publish(message);
+  Expect(first.call_count == 1U && second.call_count == 1U,
+         "each callback must run once");
+  Expect(first.frame_address == published_address &&
+             second.frame_address == published_address,
+         "all callbacks must share the same image storage");
+  Expect(publisher.UseCount() == 3U,
+         "publisher and two callbacks must own three references");
 
-void TestNullNextLeaseFailsClosed()
-{
-  Sink sink;
-  Frame frame{};
-  CommitContext context{
-      .sink = &sink,
-      .committed = &frame,
-      .next = nullptr,
-      .assigned_token = 43U,
-  };
-  const auto callback = Sink::CommitCallback::Create(CommitAdapter, &context);
-  Expect(sink.Register(&frame, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::REGISTERED,
-         "null-next registration must succeed");
-  Expect(sink.Commit() == CameraBaseDetail::ImageCommitResult::NO_WRITABLE_IMAGE,
-         "null next lease must be reported");
-  Expect(context.call_count == 1U, "null-next callback must run exactly once");
-  Expect(!sink.Ready(), "null next lease must leave the producer disabled");
-  Expect(sink.WritableImage() == nullptr,
-         "committed slot must not be exposed again after null handoff");
-  Expect(sink.Commit() == CameraBaseDetail::ImageCommitResult::NOT_READY,
-         "failed-closed sink must reject another commit");
-  Expect(context.call_count == 1U,
-         "failed-closed commit must not invoke the callback again");
-}
-
-void TestRegistrationPublicationAcrossThreads()
-{
-  Sink sink;
-  Frame frame{};
-  frame.publish_token = 44U;
-  CommitContext context{.sink = &sink, .committed = &frame, .next = &frame};
-  const auto callback = Sink::CommitCallback::Create(CommitAdapter, &context);
-  std::atomic<bool> observed{false};
-
-  std::thread producer(
-      [&]()
-      {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (!sink.Ready() && std::chrono::steady_clock::now() < deadline)
-        {
-          std::this_thread::yield();
-        }
-        observed.store(
-            sink.Ready() && sink.WritableImage() == &frame && frame.publish_token == 0U,
-            std::memory_order_release);
-      });
-  Expect(sink.Register(&frame, callback) ==
-             CameraBaseDetail::ImageSinkRegistrationResult::REGISTERED,
-         "cross-thread registration must succeed");
-  producer.join();
-  Expect(observed.load(std::memory_order_acquire),
-         "ready publication must expose initialized lease state");
+  publisher.Reset();
+  first.retained.Reset();
+  Expect(pool.Available() == 1U, "remaining callback must keep the shared slot borrowed");
+  second.retained.Reset();
+  Expect(pool.Available() == 2U, "last callback release must return the shared slot");
 }
 }  // namespace
 
 int main()
 {
-  TestRegistrationPublishesInitialLease();
-  TestCommitRotatesLeaseSynchronously();
-  TestDroppedFrameMayReuseCommittedSlot();
-  TestNullNextLeaseFailsClosed();
-  TestRegistrationPublicationAcrossThreads();
-  return EXIT_SUCCESS;
+  LibXR::PlatformInit();
+  TestCopyRetainsOneSlot();
+  TestPoolExhaustionAndRecovery();
+  TestConcurrentCopiesAndLastRelease();
+  TestConcurrentLastReleaseAndReacquire();
+  TestTopicCallbackRetainsFrame();
+  TestMultipleCallbacksShareOneFrame();
+
+  // PlatformInit 的 STDIO 线程按进程生命周期运行；不要在测试退出时伪造并发 teardown。
+  std::_Exit(EXIT_SUCCESS);
 }
