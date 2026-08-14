@@ -102,11 +102,11 @@ jobs:
           cmake .. -DBUILD_TESTING=ON
           make
 
-      - name: Run geometry tests
+      - name: Run CameraBase tests
         run: >-
           ctest --test-dir build/libxr --output-on-failure
           --no-tests=error
-          -R '^camera_geometry_test$'
+          -R '^camera_.*_test$'
 
       - name: Create Tag via GitHub API
         if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}

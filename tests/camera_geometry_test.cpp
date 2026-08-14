@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <type_traits>
 
 #include "CameraBase.hpp"
 
@@ -16,6 +17,45 @@ constexpr CameraTypes::CameraCalibration MakeCalibration()
   calibration.native_height = 1080;
   return calibration;
 }
+
+constexpr bool CalibrationDefaultsToZero()
+{
+  CameraTypes::CameraCalibration calibration;
+  for (double value : calibration.camera_matrix)
+  {
+    if (value != 0.0)
+    {
+      return false;
+    }
+  }
+  for (double value : calibration.distortion_coefficients)
+  {
+    if (value != 0.0)
+    {
+      return false;
+    }
+  }
+  for (double value : calibration.rectification_matrix)
+  {
+    if (value != 0.0)
+    {
+      return false;
+    }
+  }
+  for (double value : calibration.projection_matrix)
+  {
+    if (value != 0.0)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+static_assert(CalibrationDefaultsToZero());
+static_assert(std::is_aggregate_v<CameraTypes::CameraCalibration>);
+static_assert(std::is_standard_layout_v<CameraTypes::CameraCalibration>);
+static_assert(std::is_trivially_copyable_v<CameraTypes::CameraCalibration>);
 
 constexpr CameraTypes::FrameGeometry MakeWideGeometry()
 {
@@ -46,7 +86,8 @@ void Expect(bool condition, const char* label)
 
 void ExpectNear(double actual, double expected, const char* label)
 {
-  if (std::abs(actual - expected) > 1e-9)
+  if (!std::isfinite(actual) || !std::isfinite(expected) ||
+      std::abs(actual - expected) > 1e-9)
   {
     std::cerr << label << ": actual=" << actual << " expected=" << expected << '\n';
     std::exit(EXIT_FAILURE);
@@ -133,6 +174,13 @@ void TestValidationAndIdentity()
   invalid.sample_phase_y_native = std::numeric_limits<float>::quiet_NaN();
   Expect(!CameraTypes::ValidateFrameGeometry(kLayout, calibration, invalid),
          "non-finite phase must be rejected");
+
+  constexpr CameraTypes::FrameLayout even_yuv_layout{4, 2, 8,
+                                                     CameraTypes::Encoding::YUV422};
+  constexpr CameraTypes::FrameLayout odd_yuv_layout{3, 2, 6,
+                                                    CameraTypes::Encoding::YUV422};
+  static_assert(CameraTypes::ValidateFrameLayout(even_yuv_layout));
+  static_assert(!CameraTypes::ValidateFrameLayout(odd_yuv_layout));
 }
 }  // namespace
 

@@ -80,10 +80,11 @@ class CameraBaseIntrinsicSanity
                                         const std::array<double, 9>& k)
   {
     const double max_dim = Max(static_cast<double>(width), static_cast<double>(height));
-    const double max_focal = Max(k[0], k[4]);
+    const double min_focal = max_dim * min_focal_to_image;
+    const double max_focal = max_dim * max_focal_to_image;
     return width > 0 && height > 0 && k[0] > 0.0 && k[4] > 0.0 && max_dim > 0.0 &&
-           max_focal >= max_dim * min_focal_to_image &&
-           max_focal <= max_dim * max_focal_to_image;
+           k[0] >= min_focal && k[0] <= max_focal && k[4] >= min_focal &&
+           k[4] <= max_focal;
   }
 
   static constexpr bool FocalRatioReasonable(const std::array<double, 9>& k)
@@ -154,6 +155,11 @@ class CameraBaseIntrinsicSanity
                                     : 0.0;
     for (double value : distortion)
     {
+      if (!IsFiniteLike(value))
+      {
+        metrics.max_abs_distortion_value = Abs(value);
+        break;
+      }
       metrics.max_abs_distortion_value =
           Max(metrics.max_abs_distortion_value, Abs(value));
     }
