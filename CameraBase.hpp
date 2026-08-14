@@ -11,6 +11,7 @@ depends: []
 // clang-format on
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -63,7 +64,7 @@ class CameraTypes
     BAYER_GRBG16,  ///< 16 位 Bayer，GRBG 排列。
     BAYER_GBRG16,  ///< 16 位 Bayer，GBRG 排列。
     BAYER_BGGR16,  ///< 16 位 Bayer，BGGR 排列。
-    YUV422         ///< 打包 YUV 4:2:2。
+    YUV422         ///< 打包 YUV 4:2:2；具体字节顺序由图像源约定。
   };
 
   /**
@@ -89,16 +90,17 @@ class CameraTypes
 
   /**
    * @struct FrameLayout
-   * @brief 编译期固定的图像存储容量和像素编码。
+   * @brief 编译期固定的图像尺寸、行跨度、存储容量和像素编码。
    *
-   * `width`、`height` 和 `step` 描述 `ImageFrame::data` 能容纳的最大二维布局。
-   * 每帧实际有效区域由 `FrameGeometry` 描述，但编码在同一模板实例内保持不变。
+   * `width`、`height` 和 `step` 同时定义每帧有效布局与 `ImageFrame::data` 容量。
+   * `FrameGeometry` 必须保持这三个字段相同，仅描述 ROI、采样和方向关系；编码在同一
+   * 模板实例内保持不变。
    */
   struct FrameLayout
   {
-    uint32_t width{};     ///< 图像缓冲区最大宽度，单位像素。
-    uint32_t height{};    ///< 图像缓冲区最大高度，单位像素。
-    uint32_t step{};      ///< 图像缓冲区最大行跨度，单位字节。
+    uint32_t width{};     ///< 每帧有效宽度，单位像素。
+    uint32_t height{};    ///< 每帧有效高度，单位像素。
+    uint32_t step{};      ///< 每帧行跨度，单位字节。
     Encoding encoding{};  ///< 整个模板实例固定的像素编码。
   };
 
@@ -111,14 +113,14 @@ class CameraTypes
    */
   struct CameraCalibration
   {
-    uint32_t native_width{};              ///< 标定使用的原生传感器宽度，单位像素。
-    uint32_t native_height{};             ///< 标定使用的原生传感器高度，单位像素。
-    std::array<double, 9> camera_matrix;  ///< 3x3 原生相机内参矩阵 K。
-    DistortionModel distortion_model{};   ///< 畸变模型类型。
+    uint32_t native_width{};                ///< 标定使用的原生传感器宽度，单位像素。
+    uint32_t native_height{};               ///< 标定使用的原生传感器高度，单位像素。
+    std::array<double, 9> camera_matrix{};  ///< 3x3 原生相机内参矩阵 K。
+    DistortionModel distortion_model{};     ///< 畸变模型类型。
     std::array<double, 14>
-        distortion_coefficients;                 ///< 畸变参数，布局跟随 ROS CameraInfo。
-    std::array<double, 9> rectification_matrix;  ///< 3x3 校正旋转矩阵 R。
-    std::array<double, 12> projection_matrix;    ///< 3x4 原生投影矩阵 P。
+        distortion_coefficients{};  ///< 畸变参数，布局跟随 ROS CameraInfo。
+    std::array<double, 9> rectification_matrix{};  ///< 3x3 校正旋转矩阵 R。
+    std::array<double, 12> projection_matrix{};    ///< 3x4 原生投影矩阵 P。
   };
 
   /**
@@ -137,7 +139,8 @@ class CameraTypes
    * @brief 一帧图像相对原生传感器坐标系的采样关系。
    *
    * `roi_offset_*_native` 和 `sample_phase_*_native` 均使用原生像素中心坐标。
-   * 当前实现只接受固定 epoch；结构按值进入 `ImageFrame`，可安全跨线程和共享内存。
+   * `epoch` 必须非零；是否允许运行期变化由接收图像的 sink 决定。结构按值进入
+   * `ImageFrame`，可安全跨线程和共享内存。
    */
   struct FrameGeometry
   {
@@ -160,6 +163,7 @@ class CameraTypes
   static_assert(std::is_standard_layout_v<FrameLayout>);
   static_assert(std::is_trivially_copyable_v<CameraCalibration>);
   static_assert(std::is_standard_layout_v<CameraCalibration>);
+  static_assert(std::is_aggregate_v<CameraCalibration>);
   static_assert(std::is_trivially_copyable_v<FrameGeometry>);
   static_assert(std::is_standard_layout_v<FrameGeometry>);
 
@@ -209,9 +213,10 @@ class CameraTypes
     const uint32_t bytes_per_pixel = BytesPerPixel(layout.encoding);
     const uint64_t minimum_step = static_cast<uint64_t>(layout.width) * bytes_per_pixel;
     const uint64_t image_bytes = static_cast<uint64_t>(layout.step) * layout.height;
+    const bool packed_width_valid = layout.encoding != YUV422 || layout.width % 2U == 0U;
     return layout.width != 0 && layout.height != 0 && layout.step != 0 &&
-           bytes_per_pixel != 0 && layout.step >= minimum_step && image_bytes != 0 &&
-           image_bytes <= std::numeric_limits<std::size_t>::max();
+           bytes_per_pixel != 0 && packed_width_valid && layout.step >= minimum_step &&
+           image_bytes != 0 && image_bytes <= std::numeric_limits<std::size_t>::max();
   }
 
   /**
@@ -408,13 +413,114 @@ class CameraTypes
 
 #include "CameraBaseIntrinsicSanity.hpp"
 
+namespace CameraBaseDetail
+{
+enum class ImageSinkRegistrationResult : uint8_t
+{
+  REGISTERED,
+  INVALID_ARGUMENT,
+  ALREADY_REGISTERED,
+};
+
+enum class ImageCommitResult : uint8_t
+{
+  COMMITTED,
+  NOT_READY,
+  NO_WRITABLE_IMAGE,
+};
+
+/**
+ * @brief 单生产者图像槽位交接状态机。
+ *
+ * CameraBase 在回调执行前撤销生产者的写权限。sink 必须同步处理提交，并返回一块
+ * 独占可写槽位；若本帧未发布，可以返回刚提交的原槽位表示丢弃并复用。
+ * `Register()` 只由初始化线程调用一次；发布就绪后仅一个采集线程可调用
+ * `WritableImage()` 和 `Commit()`，其他线程最多查询 `Ready()`。
+ *
+ * @tparam Frame 带有 `publish_token` 字段的图像帧类型。
+ */
+template <typename Frame>
+class ImageSinkState
+{
+ public:
+  using CommitCallback = LibXR::Callback<Frame*&>;
+
+  ImageSinkState() = default;
+  ImageSinkState(const ImageSinkState&) = delete;
+  ImageSinkState& operator=(const ImageSinkState&) = delete;
+  ImageSinkState(ImageSinkState&&) = delete;
+  ImageSinkState& operator=(ImageSinkState&&) = delete;
+
+  [[nodiscard]] ImageSinkRegistrationResult Register(Frame* initial_image,
+                                                     CommitCallback callback)
+  {
+    if (initial_image == nullptr || callback.Empty())
+    {
+      return ImageSinkRegistrationResult::INVALID_ARGUMENT;
+    }
+    if (!commit_callback_.Empty())
+    {
+      return ImageSinkRegistrationResult::ALREADY_REGISTERED;
+    }
+
+    initial_image->publish_token = 0U;
+    writable_image_ = initial_image;
+    commit_callback_ = callback;
+    ready_.store(true, std::memory_order_release);
+    return ImageSinkRegistrationResult::REGISTERED;
+  }
+
+  [[nodiscard]] bool Ready() const noexcept
+  {
+    return ready_.load(std::memory_order_acquire);
+  }
+
+  [[nodiscard]] Frame* WritableImage() noexcept
+  {
+    return Ready() ? writable_image_ : nullptr;
+  }
+
+  [[nodiscard]] ImageCommitResult Commit()
+  {
+    if (!Ready())
+    {
+      return ImageCommitResult::NOT_READY;
+    }
+
+    Frame* committed_image = writable_image_;
+    ready_.store(false, std::memory_order_release);
+    writable_image_ = nullptr;
+    committed_image->publish_token = 0U;
+
+    Frame* next_image = nullptr;
+    commit_callback_.Run(false, next_image);
+    if (next_image == nullptr)
+    {
+      return ImageCommitResult::NO_WRITABLE_IMAGE;
+    }
+
+    // 原槽丢帧复用和新槽租出都从生产者持有状态开始。
+    next_image->publish_token = 0U;
+    writable_image_ = next_image;
+    ready_.store(true, std::memory_order_release);
+    return ImageCommitResult::COMMITTED;
+  }
+
+ private:
+  Frame* writable_image_{nullptr};
+  CommitCallback commit_callback_{};
+  std::atomic<bool> ready_{false};
+};
+}  // namespace CameraBaseDetail
+
 /**
  * @class CameraBase
  * @brief 编译期绑定帧存储布局、运行期持有原生标定的相机生产者基类。
  *
  * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充
  * `ImageFrame`，其他模块通过 `RegisterImageSink()` 提供可写槽位并接收图像。
- * 本类不负责记录、标定、预览、图像同步或坐标系转换。
+ * 本类不分配图像槽、不保存队列，也不负责记录、标定、预览、图像同步或坐标系转换。
+ * sink 回调与 `CommitImage()` 同步执行，是发布前预处理、背压和丢帧决策的唯一边界。
  *
  * @tparam FrameLayoutV 编译期图像存储容量和像素格式描述。
  */
@@ -443,12 +549,17 @@ class CameraBase
    *
    * `data` 按 `frame_layout.encoding` 和逐帧 `geometry.step` 解释。生产者只能在当前
    * writable slot 生命周期内写入该对象；调用 `CommitImage()` 后不得继续访问旧槽位。
+   * `timestamp_us` 必须保留源传感器或录制文件的采样时间，不能改写成主机到达、解码、
+   * 预处理或发布时间。实时采集应保留设备时钟的采样语义。CameraBase 不比较或重映射
+   * 时间域；重复、回退、回绕或复位由 sink 的同步状态机处理。确定性回放必须保留原始
+   * 顺序和时间，包括原始重复值。
    */
   struct alignas(image_alignment) ImageFrame
   {
     LibXR::MicrosecondTimestamp
-        timestamp_us;        ///< 图像采集时间戳，单位微秒，语义由具体相机源定义。
-    FrameGeometry geometry;  ///< 当前像素负载到原生传感器坐标系的映射。
+        timestamp_us;          ///< 传感器采样时间，单位微秒；不是主机到达或发布时间。
+    uint64_t publish_token{};  ///< sink 分配的进程内发布标识；生产者持有时为 0。
+    FrameGeometry geometry;    ///< 当前像素负载到原生传感器坐标系的映射。
     alignas(image_alignment)
         std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
   };
@@ -458,10 +569,12 @@ class CameraBase
    * @brief 与图像同步搬运的位姿与惯导采样。
    *
    * `CameraBase` 只负责发布该数据；同步、插值和坐标系定义由生成该数据的模块保证。
+   * 同一同步结果的 `timestamp_us` 和 `publish_token` 必须分别与图像一致。
    */
-  struct ImuStamped
+  struct alignas(8) ImuStamped
   {
     LibXR::MicrosecondTimestamp timestamp_us;      ///< 同步后时间戳，单位微秒。
+    uint64_t publish_token{};                      ///< 对应共享图像的发布标识。
     std::array<float, 4> rotation_wxyz;            ///< 姿态四元数，顺序为 wxyz。
     std::array<float, 3> translation_xyz;          ///< 平移，单位米；无平移来源时置零。
     std::array<float, 3> angular_velocity_xyz;     ///< 角速度，单位 rad/s。
@@ -471,7 +584,10 @@ class CameraBase
   /**
    * @brief 图像生产者提交一帧后由 sink 返回下一个可写槽位的回调。
    *
-   * 回调参数为输出引用：sink 必须把下一帧可写的 `ImageFrame*` 写回该引用。
+   * 回调在调用 `CommitImage()` 的生产者线程内同步执行。sink 已持有当前槽位句柄，回调
+   * 参数只用于返回下一帧独占可写的 `ImageFrame*`。发布前预处理必须在回调发起发布前
+   * 完成。没有可发布槽位或预处理拒绝时，sink 可不发布并返回当前槽位表示丢帧复用；
+   * 返回 nullptr 是不可恢复的契约错误，会让生产者保持未就绪。
    */
   using ImageCommitCallback = LibXR::Callback<ImageFrame*&>;
 
@@ -491,12 +607,39 @@ class CameraBase
                 "CameraBase::ImageFrame must be standard layout");
   static_assert(std::is_standard_layout_v<ImuStamped>,
                 "CameraBase::ImuStamped must be standard layout");
+  static_assert(std::is_trivially_copyable_v<ImuStamped>,
+                "CameraBase::ImuStamped must be trivially copyable");
+  static_assert(alignof(ImuStamped) == 8, "CameraBase::ImuStamped alignment ABI changed");
   static_assert(alignof(ImageFrame) >= image_alignment,
                 "CameraBase::ImageFrame alignment is too small");
+  static_assert(offsetof(ImageFrame, timestamp_us) == 0,
+                "CameraBase::ImageFrame timestamp offset ABI changed");
+  static_assert(offsetof(ImageFrame, publish_token) == 8,
+                "CameraBase::ImageFrame publish token offset ABI changed");
+  static_assert(offsetof(ImageFrame, geometry) == 16,
+                "CameraBase::ImageFrame geometry offset ABI changed");
   static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
                 "CameraBase::ImageFrame image data must stay aligned");
   static_assert(offsetof(ImageFrame, data) == image_alignment,
                 "CameraBase::ImageFrame image data offset ABI changed");
+  static_assert(sizeof(ImageFrame) ==
+                    ((image_alignment + image_bytes + image_alignment - 1U) /
+                     image_alignment) *
+                        image_alignment,
+                "CameraBase::ImageFrame size ABI changed");
+  static_assert(offsetof(ImuStamped, timestamp_us) == 0,
+                "CameraBase::ImuStamped timestamp offset ABI changed");
+  static_assert(offsetof(ImuStamped, publish_token) == 8,
+                "CameraBase::ImuStamped publish token offset ABI changed");
+  static_assert(offsetof(ImuStamped, rotation_wxyz) == 16,
+                "CameraBase::ImuStamped rotation offset ABI changed");
+  static_assert(offsetof(ImuStamped, translation_xyz) == 32,
+                "CameraBase::ImuStamped translation offset ABI changed");
+  static_assert(offsetof(ImuStamped, angular_velocity_xyz) == 44,
+                "CameraBase::ImuStamped angular velocity offset ABI changed");
+  static_assert(offsetof(ImuStamped, linear_acceleration_xyz) == 56,
+                "CameraBase::ImuStamped linear acceleration offset ABI changed");
+  static_assert(sizeof(ImuStamped) == 72, "CameraBase::ImuStamped size ABI changed");
 
   /**
    * @brief 构造相机基础对象并注册调试命令文件。
@@ -522,8 +665,16 @@ class CameraBase
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
+  CameraBase(const CameraBase&) = delete;
+  CameraBase& operator=(const CameraBase&) = delete;
+  CameraBase(CameraBase&&) = delete;
+  CameraBase& operator=(CameraBase&&) = delete;
+
   /**
-   * @brief 虚析构，允许通过基类指针释放具体相机实现。
+   * @brief 仅提供多态类型完整性，不承担 sink 注销或线程停止语义。
+   *
+   * CameraBase 与已注册 sink 按进程生命周期使用。析构不是并发边界，调用方不得依赖
+   * 本析构等待回调、回收槽位或终止派生类工作线程。
    */
   virtual ~CameraBase() = default;
 
@@ -581,7 +732,8 @@ class CameraBase
   /**
    * @brief 发布同步 IMU 数据。
    *
-   * @param imu 标准布局 IMU 载荷，会按 `imu_topic_name` 发布。
+   * @param imu 标准布局 IMU 载荷，会按 `imu_topic_name` 发布。其时间戳与发布标识由同步
+   * 模块填写，CameraBase 不做转换或校验。
    */
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
@@ -592,66 +744,65 @@ class CameraBase
    * @param commit_callback 提交当前帧并返回下一个可写槽位的回调。
    * @return 注册成功返回 true；参数非法或重复注册返回 false。
    *
-   * 具体相机只写入当前可写槽位，不拥有图像队列。当前实现只允许注册一个 sink。
+   * 具体相机只写入当前可写槽位，不拥有图像队列。当前实现只允许注册一个进程生命周期
+   * sink，不支持注销或替换。注册可发生在采集线程已经开始轮询之后；初始槽位和回调会
+   * 通过 release/acquire 就绪门闩一次性发布。仅初始化线程可调用本方法一次。
    */
   bool RegisterImageSink(ImageFrame* initial_image, ImageCommitCallback commit_callback)
   {
-    if (initial_image == nullptr || commit_callback.Empty())
+    const auto result = image_sink_.Register(initial_image, commit_callback);
+    if (result == CameraBaseDetail::ImageSinkRegistrationResult::INVALID_ARGUMENT)
     {
       XR_LOG_ERROR("CameraBase(%s): image sink registration got invalid argument",
                    name_.c_str());
       return false;
     }
-    if (!image_commit_callback_.Empty())
+    if (result == CameraBaseDetail::ImageSinkRegistrationResult::ALREADY_REGISTERED)
     {
       XR_LOG_ERROR("CameraBase(%s): image sink already registered", name_.c_str());
       return false;
     }
-
-    writable_image_ = initial_image;
-    image_commit_callback_ = commit_callback;
     return true;
   }
 
   /**
    * @brief 查询图像 sink 是否已经可用。
    *
-   * @return 已注册 commit 回调且当前可写槽位非空时返回 true。
+   * @return 已注册 commit 回调且当前可写槽位非空时返回 true。采集线程可在启动阶段
+   * 轮询该状态；它不代表下游曾成功发布图像。此只读查询可从其他线程调用。
    */
-  bool ImageSinkReady() const
-  {
-    return !image_commit_callback_.Empty() && writable_image_ != nullptr;
-  }
+  bool ImageSinkReady() const noexcept { return image_sink_.Ready(); }
 
   /**
    * @brief 获取当前可写图像槽位。
    *
-   * @return sink 未就绪时返回 nullptr；否则返回生产者可写入的 `ImageFrame`。
+   * @return sink 未就绪时返回 nullptr；否则返回生产者独占写入的 `ImageFrame`。
+   * 注册完成后，本方法和 `CommitImage()` 只能由同一个采集线程调用。
    */
-  ImageFrame* GetWritableImage() { return ImageSinkReady() ? writable_image_ : nullptr; }
+  ImageFrame* GetWritableImage() noexcept { return image_sink_.WritableImage(); }
 
   /**
    * @brief 提交当前可写图像并切换到 sink 返回的下一槽位。
    *
-   * @return 提交成功且获得下一可写槽位时返回 true。
+   * 回调执行期间生产者写权限被撤销。返回 true 只表示回调已完成且获得下一写租约，
+   * 不表示当前帧已发布或被下游接受；发布、背压和丢帧结果由 sink 自己记录。回调可以
+   * 查询 `ImageSinkReady()`，但不得重新注册 sink、递归提交或生产下一帧。
+   *
+   * @return 获得下一可写槽位时返回 true；未注册或回调返回 nullptr 时返回 false。
    */
   bool CommitImage()
   {
-    if (!ImageSinkReady() || image_commit_callback_.Empty())
+    const auto result = image_sink_.Commit();
+    if (result == CameraBaseDetail::ImageCommitResult::NOT_READY)
     {
       return false;
     }
-
-    ImageFrame* next_image = nullptr;
-    image_commit_callback_.Run(false, next_image);
-    if (next_image == nullptr)
+    if (result == CameraBaseDetail::ImageCommitResult::NO_WRITABLE_IMAGE)
     {
       XR_LOG_ERROR("CameraBase(%s): image sink callback returned null writable image",
                    name_.c_str());
       return false;
     }
-
-    writable_image_ = next_image;
     return true;
   }
 
@@ -698,6 +849,5 @@ class CameraBase
   std::string imu_topic_name_;           ///< `PublishImu()` 发布同步 IMU 的 topic 名称。
   LibXR::RamFS::File cmd_file_;          ///< 曝光/增益调试命令入口。
   LibXR::Topic imu_topic_;               ///< 同步 IMU 发布 topic。
-  ImageFrame* writable_image_{nullptr};  ///< 当前可写图像槽位。
-  ImageCommitCallback image_commit_callback_{};  ///< 提交图像并换取下一槽位的回调。
+  CameraBaseDetail::ImageSinkState<ImageFrame> image_sink_;  ///< 图像槽位交接状态。
 };

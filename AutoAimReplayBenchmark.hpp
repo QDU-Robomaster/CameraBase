@@ -37,9 +37,33 @@ inline void RecordDetector(uint64_t, double, double, double, double, double, dou
                            double, uint32_t, uint32_t)
 {
 }
+inline void RecordPipelineTiming(uint64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                                 int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                                 int64_t, int64_t, int64_t, int64_t, int64_t, uint32_t,
+                                 uint32_t, uint64_t, bool, uint64_t)
+{
+}
+inline void RecordAsyncPipelineTiming(uint64_t, uint64_t, uint64_t, int64_t, int64_t,
+                                      uint64_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                                      bool, int64_t, int64_t, int64_t, int64_t, uint64_t,
+                                      int64_t)
+{
+}
+inline void RecordPipelineNoFree() {}
+inline constexpr uint64_t PipelineNoFreeCount() { return 0U; }
+inline void RecordDetectorPipelineCounters(uint64_t, uint64_t, uint64_t, uint64_t,
+                                           uint64_t, uint64_t, uint64_t, uint64_t,
+                                           uint64_t, uint64_t)
+{
+}
 inline void RecordDetection(uint64_t, DetectionRecord) {}
 inline void RecordTrackerEnqueue(uint64_t) {}
 inline void RecordTrackerQueued(uint64_t, double) {}
+inline void RecordTrackerQueueAdmission(uint64_t, uint64_t, double, bool, uint32_t,
+                                        uint32_t, uint32_t)
+{
+}
+inline void RecordTrackerWorkerService(uint64_t, uint64_t, uint64_t, double) {}
 inline void RecordTrackerOverwrite() {}
 inline void RecordTrackerStart(uint64_t) {}
 inline void RecordTracker(uint64_t, double, bool, int, const std::array<double, 3>&,
