@@ -25,7 +25,7 @@ CameraBase 提供相机模块共用的 C++ 类型，以及单进程内的共享�
 `projection_matrix` 仅按值携带，不在本模块内验证。
 
 `CameraTypes::FrameGeometry` 描述一帧图像到原生传感器坐标的映射。它携带
-`epoch`、当前帧尺寸和步长、原生 ROI 偏移、横纵下采样倍率、翻转标志和采样相位。
+当前帧尺寸和步长、原生 ROI 偏移、横纵下采样倍率、翻转标志和采样相位。
 坐标映射为：
 
 ```text
@@ -36,17 +36,20 @@ native = roi_offset + sample_phase + decimation * oriented
 同一镜头只保存一份 `CameraCalibration`；ROI、下采样和翻转不修改内参，而是由每帧
 `FrameGeometry` 表达。
 
+`CameraTypes::CameraProfile` 描述相机支持的固定采样档位，包括唯一的
+`ProfileId::{WIDE,NARROW}`、逐帧几何和非零触发周期。`AppliedProfile` 是切档成功后
+驱动返回的实际档位与几何快照。
+
 `CameraBase<FrameLayoutV>::ImageFrame` 表示一帧图像：
 
 - `timestamp_us`：源传感器或录制文件的采样时间，单位微秒
-- `publish_token`：留给后续同步阶段使用的进程内标识；CameraBase 交给生产者时为零
 - `geometry`：当前帧按值携带的 `FrameGeometry`
 - `data`：固定大小图像数据，大小为 `FrameLayoutV.step * FrameLayoutV.height`
 
-`CameraBase<FrameLayoutV>::ImuStamped` 表示一帧同步 IMU 数据：
+`CameraBase<FrameLayoutV>::ImuStamped` 表示一帧同步 IMU 数据。阶段包装可以把相机本地
+时间的 `ImageFrame` 与 MCU 时间的 `ImuStamped` 关联起来，两者时间戳不要求数值相等：
 
-- `timestamp_us`：时间戳，单位微秒
-- `publish_token`：对应共享图像的发布标识
+- `timestamp_us`：生成同步结果的模块定义的权威时间，单位微秒
 - `rotation_wxyz`：四元数，顺序为 `w, x, y, z`
 - `translation_xyz`：平移，单位米
 - `angular_velocity_xyz`：角速度，单位 `rad/s`
@@ -62,7 +65,7 @@ native = roi_offset + sample_phase + decimation * oriented
 - 布局宽高和 `step` 非零，且 `step` 能容纳一行像素
 - 内参矩阵中的焦距和主点要落在合理范围内
 - `fx / fy` 比例不能明显异常
-- `FrameGeometry` 的 `epoch`、下采样倍率和采样相位有效
+- `FrameGeometry` 的下采样倍率和采样相位有效
 - 当前帧尺寸和 `step` 与 `FrameLayoutV` 一致，映射结果不超出原生标定范围
 
 这些检查只拒绝错误配置，不会缩放或改写标定。
@@ -96,12 +99,17 @@ void OnImage(bool, Worker* worker, const Camera::SharedFrame* borrowed) {
 }
 ```
 
-所有副本指向同一个 `ImageFrame`。生产者调用 `CommitImage()` 后不得再访问旧写指针；
-下游默认只读图像数据，确需修改共享帧的阶段必须自行保证没有并发读写。
+所有副本指向同一个 `ImageFrame`，并且只能通过 `SharedFrame` 只读访问。可写指针只由
+CameraBase 私有图像池授予当前唯一生产者；生产者调用 `CommitImage()` 后不得再访问旧
+写指针，写权限不会随 topic 中的句柄传播到下游。
 
 `CommitImage()` 返回 true 表示当前帧已经完成同步发布，返回值不再描述下一槽位。
 下一次 `GetWritableImage()` 会按需获取槽位；八个槽都仍被下游持有时返回 nullptr，
 任一持有者释放后即可恢复。没有订阅者时，发布结束即归还当前槽位。
+
+派生驱动在采集线程确认停流后、切档前可调用受保护的 `DiscardWritableImage()`，立即
+释放尚未提交的生产者槽位。该操作不发布图像、不等待下游仍持有的其他槽位；后续
+`GetWritableImage()` 会按需重新取槽。
 
 不能用 `Topic::SyncSubscriber` 或 `Topic::QueuedSubscriber` 接管图像所有权：前者
 可能错过发布，后者队列满时会静默丢弃，而普通 `Topic::Publish()` 不返回逐订阅者的
@@ -114,10 +122,6 @@ void OnImage(bool, Worker* worker, const Camera::SharedFrame* borrowed) {
 不重映射时钟域，也不处理复位、回绕、回退或跨源排序；同步模块按自己的时间线策略
 接受、复位或丢帧。确定性回放必须保持输入记录的原始顺序和时间，包括原始重复值，
 不能为了制造单调时间线而改写数据。
-
-`publish_token` 只区分同一进程内的同步结果，不能代替时间戳、帧号或持久化 ID。
-CameraBase 在每次把槽位交给生产者前将 token 清零；需要图像/IMU 配对的同步阶段负责
-分配非零 token，并让 `ImageFrame` 与 `ImuStamped` 携带同一个值。
 
 ## 预处理与背压
 
@@ -158,7 +162,14 @@ set_gain <值>
 ```cpp
 void SetExposure(double exposure) override;
 void SetGain(double gain) override;
+std::span<const CameraProfile> Profiles() const noexcept override;
+LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override;
 ```
+
+`Profiles()` 返回的表必须非空且在相机生命周期内保持地址和顺序稳定；首项是构造完成
+时的当前档位，ID 唯一，触发周期非零。`SwitchProfile()` 是阻塞事务：同档请求也返回
+`OK` 并填写 `applied`，不支持返回 `NOT_SUPPORT`，其他失败同样不得修改 `applied`。
+失败后的实际相机状态由派生驱动和上层状态机处理，本接口不承诺自动回滚或恢复采集。
 
 采集时只写当前可写槽位：
 
@@ -182,10 +193,12 @@ if (!CommitImage()) {
 
 - `step` 是字节数，不是像素数
 - `YUV422` 只保证每像素两字节且宽度为偶数，打包顺序仍由具体源约定；当前主链不用它
-- `FrameGeometry` 固定为 40 字节，按值进入 `ImageFrame`
+- `FrameGeometry` 固定为 36 字节，按值进入 `ImageFrame`
 - `ImageFrame` 和 `ImuStamped` 均为标准布局、可平凡复制类型
-- `publish_token` 改变了两种载荷的 ABI；所有参与模块必须使用同一 CameraBase 版本重编译，
-  并随同一进程一起重启，不能和旧布局混用
+- `ImageFrame::geometry` 位于偏移 8，图像数据仍从 64 字节对齐的偏移 64 开始；
+  `ImuStamped` 固定为 64 字节
+- 上述载荷布局属于 ABI；所有参与模块必须使用同一 CameraBase 版本重编译，并随同一
+  进程一起重启，不能和旧布局混用
 - CameraBase 保存八个固定图像槽和一个当前可写句柄，不保存消息队列
 - `SharedFrame` 只用于单进程共享所有权，不可序列化或跨进程传递
 - 原生内参放在不可变 `CameraCalibration`，相机外参不放在这里

@@ -18,6 +18,7 @@ depends: []
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -138,16 +139,24 @@ class CameraTypes
   };
 
   /**
+   * @enum ProfileId
+   * @brief 相机支持的固定采样档位标识。
+   */
+  enum class ProfileId : uint8_t
+  {
+    WIDE = 0,  ///< 宽视场档位。
+    NARROW,    ///< 窄视场档位。
+  };
+
+  /**
    * @struct FrameGeometry
    * @brief 一帧图像相对原生传感器坐标系的采样关系。
    *
    * `roi_offset_*_native` 和 `sample_phase_*_native` 均使用原生像素中心坐标。
-   * `epoch` 必须非零；是否允许运行期变化由接收图像的模块决定。结构按值进入
-   * `ImageFrame`，可安全跨线程和共享内存。
+   * 结构按值进入 `ImageFrame`，可安全跨线程和共享内存。
    */
   struct FrameGeometry
   {
-    uint32_t epoch{};                ///< 几何配置代次；0 为无效值。
     uint32_t width{};                ///< 当前帧有效宽度，单位像素。
     uint32_t height{};               ///< 当前帧有效高度，单位像素。
     uint32_t step{};                 ///< 当前帧有效行跨度，单位字节。
@@ -161,7 +170,28 @@ class CameraTypes
     float sample_phase_y_native{};   ///< 第 0 行像素中心相对 ROI 起点的原生 y 相位。
   };
 
-  static_assert(sizeof(FrameGeometry) == 40, "CameraTypes::FrameGeometry ABI changed");
+  /**
+   * @struct CameraProfile
+   * @brief 相机驱动公开的一个固定采样档位。
+   */
+  struct CameraProfile
+  {
+    ProfileId id{ProfileId::WIDE};  ///< 档位标识。
+    FrameGeometry geometry{};       ///< 该档位成功生效后的逐帧几何。
+    uint32_t trigger_period_us{};   ///< 该档位要求的触发周期，单位微秒且必须非零。
+  };
+
+  /**
+   * @struct AppliedProfile
+   * @brief 驱动成功切档后实际生效的档位快照。
+   */
+  struct AppliedProfile
+  {
+    ProfileId id{ProfileId::WIDE};  ///< 实际生效的档位标识。
+    FrameGeometry geometry{};       ///< 后续图像逐帧携带的实际几何。
+  };
+
+  static_assert(sizeof(FrameGeometry) == 36, "CameraTypes::FrameGeometry ABI changed");
   static_assert(std::is_trivially_copyable_v<FrameLayout>);
   static_assert(std::is_standard_layout_v<FrameLayout>);
   static_assert(std::is_trivially_copyable_v<CameraCalibration>);
@@ -169,6 +199,10 @@ class CameraTypes
   static_assert(std::is_aggregate_v<CameraCalibration>);
   static_assert(std::is_trivially_copyable_v<FrameGeometry>);
   static_assert(std::is_standard_layout_v<FrameGeometry>);
+  static_assert(std::is_trivially_copyable_v<CameraProfile>);
+  static_assert(std::is_standard_layout_v<CameraProfile>);
+  static_assert(std::is_trivially_copyable_v<AppliedProfile>);
+  static_assert(std::is_standard_layout_v<AppliedProfile>);
 
   /**
    * @brief 返回固定编码下每个像素占用的字节数；不支持的编码返回 0。
@@ -240,8 +274,8 @@ class CameraTypes
         geometry.sample_phase_y_native == geometry.sample_phase_y_native;
 
     if (!ValidateFrameLayout(layout) || calibration.native_width == 0 ||
-        calibration.native_height == 0 || geometry.epoch == 0 || geometry.width == 0 ||
-        geometry.height == 0 || geometry.step == 0 || geometry.width != layout.width ||
+        calibration.native_height == 0 || geometry.width == 0 || geometry.height == 0 ||
+        geometry.step == 0 || geometry.width != layout.width ||
         geometry.height != layout.height || geometry.step != layout.step ||
         geometry.step < minimum_step || active_bytes > capacity_bytes ||
         geometry.decimation_x == 0 || geometry.decimation_y == 0 ||
@@ -272,11 +306,11 @@ class CameraTypes
   [[nodiscard]] static constexpr bool SameFrameGeometry(const FrameGeometry& lhs,
                                                         const FrameGeometry& rhs)
   {
-    return lhs.epoch == rhs.epoch && lhs.width == rhs.width && lhs.height == rhs.height &&
-           lhs.step == rhs.step && lhs.roi_offset_x_native == rhs.roi_offset_x_native &&
+    return lhs.width == rhs.width && lhs.height == rhs.height && lhs.step == rhs.step &&
+           lhs.roi_offset_x_native == rhs.roi_offset_x_native &&
            lhs.roi_offset_y_native == rhs.roi_offset_y_native &&
            lhs.decimation_x == rhs.decimation_x && lhs.decimation_y == rhs.decimation_y &&
-           lhs.flags == rhs.flags && lhs.reserved == rhs.reserved &&
+           lhs.flags == rhs.flags &&
            lhs.sample_phase_x_native == rhs.sample_phase_x_native &&
            lhs.sample_phase_y_native == rhs.sample_phase_y_native;
   }
@@ -423,7 +457,8 @@ namespace CameraBaseDetail
  *
  * 底层 `MPMCObjectPool` 继续负责固定槽位的分配和回收；每个已借出槽位由一个
  * `SharedHandle` 独占或共享持有。复制 handle 增加原子引用计数，移动只转移本地所有权，
- * 最后一个 handle 析构时才把底层独占 pool handle 归还。
+ * 最后一个 handle 析构时才把底层独占 pool handle 归还。句柄只暴露只读访问；生产者
+ * 必须通过所属 pool 的 `GetWritable()` 取得独占可写指针。
  *
  * @tparam Data 槽位中的对象类型。
  * @tparam SlotCount 固定槽位数。
@@ -450,8 +485,8 @@ class SharedObjectPool
    * @brief 一个池槽位的可复制共享所有权句柄。
    *
    * 句柄只在当前进程内有效。复制构造和复制赋值会增加引用计数；析构和 `Reset()` 会
-   * 减少引用计数。所有副本访问同一个 `Data`；并发写入必须由调用方同步。调用方不得
-   * 让 handle 的生命周期超过所属 `SharedObjectPool`。
+   * 减少引用计数。所有副本只读访问同一个 `Data`。调用方不得让 handle 的生命周期
+   * 超过所属 `SharedObjectPool`。
    */
   class SharedHandle
   {
@@ -497,24 +532,12 @@ class SharedObjectPool
 
     [[nodiscard]] bool Valid() const noexcept { return pool_ != nullptr; }
 
-    [[nodiscard]] Data* Get() noexcept
-    {
-      return Valid() ? &pool_->Get(slot_index_, generation_) : nullptr;
-    }
-
     [[nodiscard]] const Data* Get() const noexcept
     {
       return Valid() ? &pool_->Get(slot_index_, generation_) : nullptr;
     }
 
-    [[nodiscard]] Data* operator->() noexcept { return Get(); }
     [[nodiscard]] const Data* operator->() const noexcept { return Get(); }
-
-    [[nodiscard]] Data& operator*() noexcept
-    {
-      ASSERT(Valid());
-      return *Get();
-    }
 
     [[nodiscard]] const Data& operator*() const noexcept
     {
@@ -619,6 +642,28 @@ class SharedObjectPool
     control.references.store(1U, std::memory_order_release);
     handle = SharedHandle(this, slot_index, generation);
     return LibXR::ErrorCode::OK;
+  }
+
+  /**
+   * @brief 获取本池唯一所有者当前持有槽位的可写指针。
+   *
+   * 调用方必须独占访问 `handle` 对象，且在使用返回指针期间不得复制、移动或重置该
+   * handle。句柄无效、来自其他池、代次不匹配或已有共享副本时返回 nullptr。
+   */
+  [[nodiscard]] Data* GetWritable(SharedHandle& handle) noexcept
+  {
+    if (handle.pool_ != this || handle.slot_index_ >= SlotCount)
+    {
+      return nullptr;
+    }
+
+    Control& control = controls_[handle.slot_index_];
+    if (control.generation.load(std::memory_order_acquire) != handle.generation_ ||
+        control.references.load(std::memory_order_acquire) != 1U)
+    {
+      return nullptr;
+    }
+    return &object_pool_.UnsafeAt(handle.slot_index_);
   }
 
   [[nodiscard]] std::size_t Available() const noexcept
@@ -727,6 +772,9 @@ class CameraBase
   using FrameLayout = CameraTypes::FrameLayout;              ///< 编译期帧存储布局。
   using CameraCalibration = CameraTypes::CameraCalibration;  ///< 原生相机标定。
   using FrameGeometry = CameraTypes::FrameGeometry;          ///< 逐帧采样几何。
+  using ProfileId = CameraTypes::ProfileId;                  ///< 固定采样档位标识。
+  using CameraProfile = CameraTypes::CameraProfile;          ///< 可选档位描述。
+  using AppliedProfile = CameraTypes::AppliedProfile;        ///< 实际生效档位快照。
   /// 图像帧对象和像素负载的最小对齐字节数。
   static constexpr std::size_t image_alignment = 64;
 
@@ -751,9 +799,8 @@ class CameraBase
   struct alignas(image_alignment) ImageFrame
   {
     LibXR::MicrosecondTimestamp
-        timestamp_us;          ///< 传感器采样时间，单位微秒；不是主机到达或发布时间。
-    uint64_t publish_token{};  ///< 同步阶段分配的进程内标识；生产者持有时为 0。
-    FrameGeometry geometry;    ///< 当前像素负载到原生传感器坐标系的映射。
+        timestamp_us;        ///< 传感器采样时间，单位微秒；不是主机到达或发布时间。
+    FrameGeometry geometry;  ///< 当前像素负载到原生传感器坐标系的映射。
     alignas(image_alignment)
         std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
   };
@@ -771,13 +818,13 @@ class CameraBase
    * @struct ImuStamped
    * @brief 与图像同步搬运的位姿与惯导采样。
    *
-   * `CameraBase` 只负责发布该数据；同步、插值和坐标系定义由生成该数据的模块保证。
-   * 同一同步结果的 `timestamp_us` 和 `publish_token` 必须分别与图像一致。
+   * `CameraBase` 只定义并发布该载荷；同步、插值、时间域和坐标系由生成该数据的模块
+   * 保证。阶段包装可以把相机本地时间的 `ImageFrame` 与 MCU 时间的本对象关联起来，
+   * 两个 `timestamp_us` 不要求数值相等。
    */
   struct alignas(8) ImuStamped
   {
-    LibXR::MicrosecondTimestamp timestamp_us;      ///< 同步后时间戳，单位微秒。
-    uint64_t publish_token{};                      ///< 对应共享图像的发布标识。
+    LibXR::MicrosecondTimestamp timestamp_us;      ///< 生成模块定义的权威时间，单位微秒。
     std::array<float, 4> rotation_wxyz;            ///< 姿态四元数，顺序为 wxyz。
     std::array<float, 3> translation_xyz;          ///< 平移，单位米；无平移来源时置零。
     std::array<float, 3> angular_velocity_xyz;     ///< 角速度，单位 rad/s。
@@ -807,9 +854,7 @@ class CameraBase
                 "CameraBase::ImageFrame alignment is too small");
   static_assert(offsetof(ImageFrame, timestamp_us) == 0,
                 "CameraBase::ImageFrame timestamp offset ABI changed");
-  static_assert(offsetof(ImageFrame, publish_token) == 8,
-                "CameraBase::ImageFrame publish token offset ABI changed");
-  static_assert(offsetof(ImageFrame, geometry) == 16,
+  static_assert(offsetof(ImageFrame, geometry) == 8,
                 "CameraBase::ImageFrame geometry offset ABI changed");
   static_assert(offsetof(ImageFrame, data) % image_alignment == 0,
                 "CameraBase::ImageFrame image data must stay aligned");
@@ -822,17 +867,15 @@ class CameraBase
                 "CameraBase::ImageFrame size ABI changed");
   static_assert(offsetof(ImuStamped, timestamp_us) == 0,
                 "CameraBase::ImuStamped timestamp offset ABI changed");
-  static_assert(offsetof(ImuStamped, publish_token) == 8,
-                "CameraBase::ImuStamped publish token offset ABI changed");
-  static_assert(offsetof(ImuStamped, rotation_wxyz) == 16,
+  static_assert(offsetof(ImuStamped, rotation_wxyz) == 8,
                 "CameraBase::ImuStamped rotation offset ABI changed");
-  static_assert(offsetof(ImuStamped, translation_xyz) == 32,
+  static_assert(offsetof(ImuStamped, translation_xyz) == 24,
                 "CameraBase::ImuStamped translation offset ABI changed");
-  static_assert(offsetof(ImuStamped, angular_velocity_xyz) == 44,
+  static_assert(offsetof(ImuStamped, angular_velocity_xyz) == 36,
                 "CameraBase::ImuStamped angular velocity offset ABI changed");
-  static_assert(offsetof(ImuStamped, linear_acceleration_xyz) == 56,
+  static_assert(offsetof(ImuStamped, linear_acceleration_xyz) == 48,
                 "CameraBase::ImuStamped linear acceleration offset ABI changed");
-  static_assert(sizeof(ImuStamped) == 72, "CameraBase::ImuStamped size ABI changed");
+  static_assert(sizeof(ImuStamped) == 64, "CameraBase::ImuStamped size ABI changed");
 
   /**
    * @brief 构造相机基础对象并注册调试命令文件。
@@ -859,7 +902,6 @@ class CameraBase
     ASSERT(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
     const auto result = image_pool_.Acquire(writable_frame_);
     ASSERT(result == LibXR::ErrorCode::OK);
-    writable_frame_->publish_token = 0U;
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
@@ -889,6 +931,27 @@ class CameraBase
    * @param gain 具体单位和量纲由相机实现定义。
    */
   virtual void SetGain(double gain) = 0;
+
+  /**
+   * @brief 返回本相机支持的固定采样档位表。
+   *
+   * 返回的 span 必须非空，底层存储及顺序在相机完整生命周期内保持稳定。首项描述相机
+   * 构造完成时的当前档位；每个 `id` 必须唯一，`trigger_period_us` 必须非零。
+   */
+  [[nodiscard]] virtual std::span<const CameraProfile> Profiles() const noexcept = 0;
+
+  /**
+   * @brief 阻塞切换到指定固定采样档位。
+   *
+   * 本调用在相机侧切档尝试结束后返回。请求当前档位也必须返回 `OK` 并填写
+   * `applied`；不支持的档位返回 `NOT_SUPPORT`。任何失败都不得修改 `applied`，也不得
+   * 把部分配置暴露为成功结果。本接口不承诺失败后自动回滚原档或恢复采集。
+   *
+   * @param id 请求的档位标识。
+   * @param applied 成功时写入实际生效的档位和逐帧几何；失败时保持原值。
+   * @return 成功返回 `OK`，不支持返回 `NOT_SUPPORT`，其他失败返回对应错误码。
+   */
+  virtual LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) = 0;
 
   /**
    * @brief 返回本相机实例持有的原生标定。
@@ -930,8 +993,8 @@ class CameraBase
   /**
    * @brief 发布同步 IMU 数据。
    *
-   * @param imu 标准布局 IMU 载荷，会按 `imu_topic_name` 发布。其时间戳与发布标识由同步
-   * 模块填写，CameraBase 不做转换或校验。
+   * @param imu 标准布局 IMU 载荷，会按 `imu_topic_name` 发布。其时间戳由同步模块填写，
+   * CameraBase 不做转换或校验。
    */
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
@@ -950,9 +1013,8 @@ class CameraBase
       {
         return nullptr;
       }
-      writable_frame_->publish_token = 0U;
     }
-    return writable_frame_.Get();
+    return image_pool_.GetWritable(writable_frame_);
   }
 
   /**
@@ -1025,6 +1087,17 @@ class CameraBase
     LibXR::STDIO::Printf<"未知命令：%s\n">(argv[1]);
     return -1;
   }
+
+ protected:
+  /**
+   * @brief 丢弃生产者当前尚未提交的可写图像槽位。
+   *
+   * 采集运行期间只能由调用 `GetWritableImage()` 和 `CommitImage()` 的采集线程调用。
+   * 派生驱动停流并 join 采集线程后，控制线程可在确认没有并发图像槽访问时调用。已有
+   * 下游 `SharedFrame` 不受影响，本调用不等待其他槽位归还；当前没有可写槽位时为空
+   * 操作。后续 `GetWritableImage()` 会按需重新取槽。
+   */
+  void DiscardWritableImage() noexcept { writable_frame_.Reset(); }
 
  private:
   const CameraCalibration calibration_;  ///< 构造期固定的原生相机标定。
