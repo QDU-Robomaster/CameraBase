@@ -34,19 +34,7 @@ constexpr Camera::CameraCalibration MakeCalibration()
 
 constexpr Camera::FrameGeometry MakeGeometry()
 {
-  return {
-      .width = 2U,
-      .height = 2U,
-      .step = 6U,
-      .roi_offset_x_native = 0U,
-      .roi_offset_y_native = 0U,
-      .decimation_x = 1U,
-      .decimation_y = 1U,
-      .flags = CameraTypes::FRAME_GEOMETRY_NONE,
-      .reserved = 0U,
-      .sample_phase_x_native = 0.0F,
-      .sample_phase_y_native = 0.0F,
-  };
+  return {2U, 2U, 6U, 0U, 0U, 1U, 1U, CameraTypes::FRAME_GEOMETRY_NONE, 0U, 0.0F, 0.0F};
 }
 
 constexpr Camera::FrameGeometry MakeNarrowGeometry()
