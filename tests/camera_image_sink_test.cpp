@@ -1,7 +1,9 @@
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -15,6 +17,89 @@ using Camera = CameraBase<kLayout>;
 using Frame = Camera::ImageFrame;
 using Pool = CameraBaseDetail::SharedObjectPool<Frame, 2U>;
 using Handle = Pool::SharedHandle;
+
+static_assert(std::is_same_v<decltype(std::declval<Handle&>().Get()), const Frame*>);
+static_assert(
+    std::is_same_v<decltype(std::declval<Handle&>().operator->()), const Frame*>);
+static_assert(std::is_same_v<decltype(*std::declval<Handle&>()), const Frame&>);
+
+constexpr Camera::CameraCalibration MakeCalibration()
+{
+  Camera::CameraCalibration calibration{};
+  calibration.native_width = 2U;
+  calibration.native_height = 2U;
+  calibration.camera_matrix = {1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0};
+  return calibration;
+}
+
+constexpr Camera::FrameGeometry MakeGeometry()
+{
+  return {
+      .width = 2U,
+      .height = 2U,
+      .step = 6U,
+      .roi_offset_x_native = 0U,
+      .roi_offset_y_native = 0U,
+      .decimation_x = 1U,
+      .decimation_y = 1U,
+      .flags = CameraTypes::FRAME_GEOMETRY_NONE,
+      .reserved = 0U,
+      .sample_phase_x_native = 0.0F,
+      .sample_phase_y_native = 0.0F,
+  };
+}
+
+constexpr Camera::FrameGeometry MakeNarrowGeometry()
+{
+  auto geometry = MakeGeometry();
+  geometry.flags = CameraTypes::FRAME_GEOMETRY_REVERSE_X;
+  return geometry;
+}
+
+class TestCamera final : public Camera
+{
+ public:
+  explicit TestCamera(LibXR::HardwareContainer& hw)
+      : Camera(hw, MakeCalibration(), "camera_base_profile_test",
+               "camera_base_profile_image_test", "camera_base_profile_imu_test")
+  {
+  }
+
+  void SetExposure(double) override {}
+  void SetGain(double) override {}
+
+  std::span<const CameraProfile> Profiles() const noexcept override { return profiles_; }
+
+  LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override
+  {
+    for (const auto& profile : profiles_)
+    {
+      if (profile.id == id)
+      {
+        applied = {.id = profile.id, .geometry = profile.geometry};
+        return LibXR::ErrorCode::OK;
+      }
+    }
+    return LibXR::ErrorCode::NOT_SUPPORT;
+  }
+
+  void DiscardWritableForTest() noexcept { DiscardWritableImage(); }
+
+ private:
+  inline static constexpr std::array<CameraProfile, 2U> profiles_{{
+      {.id = ProfileId::WIDE, .geometry = MakeGeometry(), .trigger_period_us = 10000U},
+      {.id = ProfileId::NARROW,
+       .geometry = MakeNarrowGeometry(),
+       .trigger_period_us = 5000U},
+  }};
+};
+
+using ProfilesMethod =
+    std::span<const Camera::CameraProfile> (Camera::*)() const noexcept;
+using SwitchProfileMethod = LibXR::ErrorCode (Camera::*)(Camera::ProfileId,
+                                                         Camera::AppliedProfile&);
+static_assert(std::is_same_v<decltype(&Camera::Profiles), ProfilesMethod>);
+static_assert(std::is_same_v<decltype(&Camera::SwitchProfile), SwitchProfileMethod>);
 
 void Expect(bool condition, const char* label)
 {
@@ -36,8 +121,10 @@ void TestCopyRetainsOneSlot()
   Expect(pool.Acquire(first) == LibXR::ErrorCode::STATE_ERR,
          "acquire must reject an already valid output handle");
 
-  Frame* frame_address = first.Get();
-  first->data[0] = 37U;
+  Frame* writable = pool.GetWritable(first);
+  Expect(writable != nullptr, "the unique pool owner must expose writable storage");
+  writable->data[0] = 37U;
+  const Frame* frame_address = first.Get();
   Handle second = first;
   Expect(first.UseCount() == 2U, "copy must increment the reference count");
   Expect(second.Get() == frame_address, "copy must refer to the same image bytes");
@@ -48,6 +135,72 @@ void TestCopyRetainsOneSlot()
   Expect(pool.Available() == 1U, "slot must remain borrowed while one owner exists");
   first.Reset();
   Expect(pool.Available() == 2U, "last reset must return the slot");
+}
+
+void TestAssignmentBoundaries()
+{
+  Pool first_pool;
+  Pool second_pool;
+  Handle destination;
+  Handle source;
+  Expect(first_pool.Acquire(destination) == LibXR::ErrorCode::OK,
+         "assignment destination acquire must succeed");
+  Expect(second_pool.Acquire(source) == LibXR::ErrorCode::OK,
+         "assignment source acquire must succeed");
+  const Frame* destination_address = destination.Get();
+  const Frame* source_address = source.Get();
+
+  Handle& destination_alias = destination;
+  destination = destination_alias;
+  Expect(destination.Get() == destination_address && destination.UseCount() == 1U,
+         "copy self-assignment must preserve one owner");
+  Handle* destination_pointer = &destination;
+  destination = std::move(*destination_pointer);
+  Expect(destination.Get() == destination_address && destination.UseCount() == 1U,
+         "move self-assignment must preserve one owner");
+
+  destination = source;
+  Expect(destination.Get() == source_address && source.UseCount() == 2U,
+         "cross-pool copy assignment must retain the source slot");
+  Expect(first_pool.Available() == 2U,
+         "cross-pool copy assignment must release the old destination slot");
+  source.Reset();
+
+  Handle replacement;
+  Expect(first_pool.Acquire(replacement) == LibXR::ErrorCode::OK,
+         "cross-pool move destination acquire must succeed");
+  replacement = std::move(destination);
+  Expect(!destination.Valid() && replacement.Get() == source_address,
+         "cross-pool move assignment must transfer the source slot");
+  Expect(first_pool.Available() == 2U,
+         "cross-pool move assignment must release the old destination slot");
+  replacement.Reset();
+  Expect(second_pool.Available() == 2U,
+         "assignment test must return the transferred slot to its source pool");
+}
+
+void TestWritableOwnershipBoundary()
+{
+  Pool pool;
+  Pool other_pool;
+  Handle owner;
+  Handle invalid;
+  Expect(pool.Acquire(owner) == LibXR::ErrorCode::OK,
+         "writable boundary test acquire must succeed");
+  Expect(pool.GetWritable(owner) != nullptr,
+         "the originating pool must accept its unique owner");
+  Expect(other_pool.GetWritable(owner) == nullptr,
+         "a different pool must reject the handle");
+  Expect(pool.GetWritable(invalid) == nullptr, "an invalid handle must not be writable");
+
+  Handle shared = owner;
+  Expect(pool.GetWritable(owner) == nullptr,
+         "a shared slot must not expose writable storage");
+  Expect(pool.GetWritable(shared) == nullptr,
+         "no copy of a shared slot may expose writable storage");
+  shared.Reset();
+  Expect(pool.GetWritable(owner) != nullptr,
+         "releasing the copy must restore unique writable access");
 }
 
 void TestPoolExhaustionAndRecovery()
@@ -177,7 +330,9 @@ void TestTopicCallbackRetainsFrame()
   Handle publisher;
   Expect(pool.Acquire(publisher) == LibXR::ErrorCode::OK,
          "topic publisher acquire must succeed");
-  publisher->data[0] = 91U;
+  Frame* writable = pool.GetWritable(publisher);
+  Expect(writable != nullptr, "topic publisher must initially own writable storage");
+  writable->data[0] = 91U;
   const Frame* published_address = publisher.Get();
 
   using Payload = const Handle*;
@@ -240,17 +395,93 @@ void TestMultipleCallbacksShareOneFrame()
   second.retained.Reset();
   Expect(pool.Available() == 2U, "last callback release must return the shared slot");
 }
+
+void TestProfileInterface(TestCamera& camera)
+{
+  const auto first_view = camera.Profiles();
+  const auto second_view = camera.Profiles();
+  Expect(!first_view.empty(), "profile table must not be empty");
+  Expect(
+      first_view.data() == second_view.data() && first_view.size() == second_view.size(),
+      "profile table storage and order must remain stable");
+  Expect(first_view.size() == 2U, "test camera must expose both fixed profiles");
+  Expect(first_view[0].id == Camera::ProfileId::WIDE,
+         "first profile must describe the construction-time profile");
+  Expect(first_view[0].id != first_view[1].id, "profile ids must be unique");
+  Expect(first_view[0].trigger_period_us != 0U && first_view[1].trigger_period_us != 0U,
+         "profile trigger periods must be non-zero");
+
+  Camera::AppliedProfile applied{};
+  Expect(camera.SwitchProfile(Camera::ProfileId::WIDE, applied) == LibXR::ErrorCode::OK,
+         "switching to the current profile must succeed");
+  Expect(applied.id == Camera::ProfileId::WIDE,
+         "same-profile switch must fill the applied result");
+  Expect(CameraTypes::SameFrameGeometry(applied.geometry, first_view[0].geometry),
+         "same-profile switch must report the applied geometry");
+  Expect(camera.SwitchProfile(Camera::ProfileId::WIDE, applied) == LibXR::ErrorCode::OK,
+         "repeating a same-profile switch must succeed");
+
+  Expect(camera.SwitchProfile(Camera::ProfileId::NARROW, applied) == LibXR::ErrorCode::OK,
+         "supported profile switch must succeed");
+  Expect(applied.id == Camera::ProfileId::NARROW,
+         "supported switch must report the selected id");
+  Expect(CameraTypes::SameFrameGeometry(applied.geometry, first_view[1].geometry),
+         "supported switch must report the selected geometry");
+
+  const Camera::AppliedProfile before_failure = applied;
+  Expect(camera.SwitchProfile(static_cast<Camera::ProfileId>(UINT8_MAX), applied) ==
+             LibXR::ErrorCode::NOT_SUPPORT,
+         "unsupported profile must return NOT_SUPPORT");
+  Expect(applied.id == before_failure.id &&
+             CameraTypes::SameFrameGeometry(applied.geometry, before_failure.geometry),
+         "failed switch must leave the applied output unchanged");
+}
+
+void TestDiscardWritableImage(TestCamera& camera)
+{
+  auto* writable = camera.GetWritableImage();
+  Expect(writable != nullptr, "camera must start with one writable slot");
+  Expect(camera.AvailableImageSlots() == Camera::image_slot_count - 1U,
+         "the producer-owned writable slot must not count as available");
+  writable->geometry = MakeGeometry();
+  writable->data[0] = 77U;
+
+  camera.DiscardWritableForTest();
+  Expect(camera.AvailableImageSlots() == Camera::image_slot_count,
+         "discard must immediately return the uncommitted slot");
+  camera.DiscardWritableForTest();
+  Expect(camera.AvailableImageSlots() == Camera::image_slot_count,
+         "discard without a writable slot must be a no-op");
+
+  writable = camera.GetWritableImage();
+  Expect(writable != nullptr, "get writable must reacquire a slot after discard");
+  writable->geometry = MakeNarrowGeometry();
+  writable->data[0] = 91U;
+  Expect(CameraTypes::SameFrameGeometry(writable->geometry, MakeNarrowGeometry()) &&
+             writable->data[0] == 91U,
+         "the reacquired slot must remain writable through CameraBase");
+  Expect(camera.AvailableImageSlots() == Camera::image_slot_count - 1U,
+         "reacquired slot must again be held by the producer");
+}
 }  // namespace
 
 int main()
 {
   LibXR::PlatformInit();
   TestCopyRetainsOneSlot();
+  TestAssignmentBoundaries();
+  TestWritableOwnershipBoundary();
   TestPoolExhaustionAndRecovery();
   TestConcurrentCopiesAndLastRelease();
   TestConcurrentLastReleaseAndReacquire();
   TestTopicCallbackRetainsFrame();
   TestMultipleCallbacksShareOneFrame();
+
+  LibXR::RamFS ramfs;
+  LibXR::HardwareContainer hw(LibXR::Entry<LibXR::RamFS>{ramfs, {"ramfs"}});
+  TestCamera camera(hw);
+  TestProfileInterface(camera);
+  TestDiscardWritableImage(camera);
 
   // PlatformInit 的 STDIO 线程按进程生命周期运行；不要在测试退出时伪造并发 teardown。
   std::_Exit(EXIT_SUCCESS);

@@ -1,3 +1,4 @@
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -60,7 +61,6 @@ static_assert(std::is_trivially_copyable_v<CameraTypes::CameraCalibration>);
 constexpr CameraTypes::FrameGeometry MakeWideGeometry()
 {
   return {
-      .epoch = 1,
       .width = 720,
       .height = 540,
       .step = 2160,
@@ -74,6 +74,12 @@ constexpr CameraTypes::FrameGeometry MakeWideGeometry()
       .sample_phase_y_native = 0.0F,
   };
 }
+
+template <typename T>
+concept HasEpochMember = requires(T value) { value.epoch; };
+
+static_assert(!HasEpochMember<CameraTypes::FrameGeometry>);
+static_assert(sizeof(CameraTypes::FrameGeometry) == 36U);
 
 void Expect(bool condition, const char* label)
 {
@@ -108,7 +114,6 @@ void TestWideMapping()
 void TestCenteredRoiAndReverse()
 {
   auto roi = MakeWideGeometry();
-  roi.epoch = 2;
   roi.roi_offset_x_native = 360;
   roi.roi_offset_y_native = 270;
   roi.decimation_x = 1;
@@ -146,23 +151,14 @@ void TestValidationAndIdentity()
   static_assert(CameraTypes::ValidateFrameGeometry(kLayout, calibration, wide));
   static_assert(CameraTypes::SameFrameGeometry(wide, wide));
 
-  auto changed_same_epoch = wide;
-  changed_same_epoch.roi_offset_x_native = 1;
-  Expect(CameraTypes::ValidateFrameGeometry(kLayout, calibration, changed_same_epoch),
-         "changed same-epoch geometry should remain individually valid");
-  Expect(!CameraTypes::SameFrameGeometry(wide, changed_same_epoch),
-         "same epoch must not hide a geometry change");
-
-  auto changed_epoch = wide;
-  changed_epoch.epoch = 2;
-  Expect(!CameraTypes::SameFrameGeometry(wide, changed_epoch),
-         "changed epoch must not match the locked geometry");
+  auto changed_geometry = wide;
+  changed_geometry.roi_offset_x_native = 1;
+  Expect(CameraTypes::ValidateFrameGeometry(kLayout, calibration, changed_geometry),
+         "changed geometry should remain individually valid");
+  Expect(!CameraTypes::SameFrameGeometry(wide, changed_geometry),
+         "a real geometry change must change identity");
 
   auto invalid = wide;
-  invalid.epoch = 0;
-  Expect(!CameraTypes::ValidateFrameGeometry(kLayout, calibration, invalid),
-         "zero epoch must be rejected");
-  invalid = wide;
   invalid.decimation_x = 0;
   Expect(!CameraTypes::ValidateFrameGeometry(kLayout, calibration, invalid),
          "zero decimation must be rejected");
@@ -175,12 +171,52 @@ void TestValidationAndIdentity()
   Expect(!CameraTypes::ValidateFrameGeometry(kLayout, calibration, invalid),
          "non-finite phase must be rejected");
 
+  auto changed_reserved = wide;
+  changed_reserved.reserved = 1;
+  Expect(!CameraTypes::ValidateFrameGeometry(kLayout, calibration, changed_reserved),
+         "non-zero reserved storage must be rejected");
+  Expect(CameraTypes::SameFrameGeometry(wide, changed_reserved),
+         "reserved storage must not define geometry identity");
+
   constexpr CameraTypes::FrameLayout even_yuv_layout{4, 2, 8,
                                                      CameraTypes::Encoding::YUV422};
   constexpr CameraTypes::FrameLayout odd_yuv_layout{3, 2, 6,
                                                     CameraTypes::Encoding::YUV422};
   static_assert(CameraTypes::ValidateFrameLayout(even_yuv_layout));
   static_assert(!CameraTypes::ValidateFrameLayout(odd_yuv_layout));
+}
+
+void TestProfileTypes()
+{
+  auto narrow_geometry = MakeWideGeometry();
+  narrow_geometry.roi_offset_x_native = 360;
+  narrow_geometry.roi_offset_y_native = 270;
+  narrow_geometry.decimation_x = 1;
+  narrow_geometry.decimation_y = 1;
+
+  const std::array<CameraTypes::CameraProfile, 2U> profiles{{
+      {.id = CameraTypes::ProfileId::WIDE,
+       .geometry = MakeWideGeometry(),
+       .trigger_period_us = 10000U},
+      {.id = CameraTypes::ProfileId::NARROW,
+       .geometry = narrow_geometry,
+       .trigger_period_us = 5000U},
+  }};
+  Expect(profiles[0].id == CameraTypes::ProfileId::WIDE,
+         "wide profile id must be preserved");
+  Expect(profiles[1].id == CameraTypes::ProfileId::NARROW,
+         "narrow profile id must be preserved");
+  Expect(profiles[0].trigger_period_us != 0U && profiles[1].trigger_period_us != 0U,
+         "profile trigger periods must be non-zero");
+  Expect(!CameraTypes::SameFrameGeometry(profiles[0].geometry, profiles[1].geometry),
+         "profile geometry must be carried by value");
+
+  const CameraTypes::AppliedProfile applied{.id = profiles[1].id,
+                                            .geometry = profiles[1].geometry};
+  Expect(applied.id == CameraTypes::ProfileId::NARROW,
+         "applied profile id must be preserved");
+  Expect(CameraTypes::SameFrameGeometry(applied.geometry, profiles[1].geometry),
+         "applied profile geometry must be preserved");
 }
 }  // namespace
 
@@ -190,5 +226,6 @@ int main()
   TestCenteredRoiAndReverse();
   TestRoundTrip();
   TestValidationAndIdentity();
+  TestProfileTypes();
   return EXIT_SUCCESS;
 }
