@@ -19,6 +19,18 @@ constexpr CameraTypes::CameraCalibration MakeCalibration()
   return calibration;
 }
 
+constexpr CameraTypes::CameraCalibration MakeCalibrationWithDistortion(
+    CameraTypes::DistortionModel model)
+{
+  auto calibration = MakeCalibration();
+  calibration.distortion_model = model;
+  for (std::size_t i = 0; i < calibration.distortion_coefficients.size(); ++i)
+  {
+    calibration.distortion_coefficients[i] = static_cast<double>(i + 1U) * 0.125;
+  }
+  return calibration;
+}
+
 constexpr bool CalibrationDefaultsToZero()
 {
   CameraTypes::CameraCalibration calibration;
@@ -58,21 +70,55 @@ static_assert(std::is_aggregate_v<CameraTypes::CameraCalibration>);
 static_assert(std::is_standard_layout_v<CameraTypes::CameraCalibration>);
 static_assert(std::is_trivially_copyable_v<CameraTypes::CameraCalibration>);
 
+constexpr auto kNoDistortion = CameraTypes::BuildPnPDistCoeffs(
+    MakeCalibrationWithDistortion(CameraTypes::DistortionModel::NONE));
+static_assert(kNoDistortion.size == 0U);
+static_assert(!kNoDistortion.uses_rational_polynomial_extension);
+static_assert(!kNoDistortion.requires_undistort_first);
+
+constexpr auto kPlumbBobDistortion = CameraTypes::BuildPnPDistCoeffs(
+    MakeCalibrationWithDistortion(CameraTypes::DistortionModel::PLUMB_BOB));
+static_assert(kPlumbBobDistortion.size == 5U);
+static_assert(kPlumbBobDistortion.values[0] == 0.125);
+static_assert(kPlumbBobDistortion.values[1] == 0.25);
+static_assert(kPlumbBobDistortion.values[2] == 0.375);
+static_assert(kPlumbBobDistortion.values[3] == 0.5);
+static_assert(kPlumbBobDistortion.values[4] == 0.625);
+static_assert(!kPlumbBobDistortion.uses_rational_polynomial_extension);
+static_assert(!kPlumbBobDistortion.requires_undistort_first);
+
+constexpr auto kRationalDistortion = CameraTypes::BuildPnPDistCoeffs(
+    MakeCalibrationWithDistortion(CameraTypes::DistortionModel::RATIONAL_POLYNOMIAL));
+static_assert(kRationalDistortion.size == 8U);
+static_assert(kRationalDistortion.values[0] == 0.125);
+static_assert(kRationalDistortion.values[1] == 0.25);
+static_assert(kRationalDistortion.values[2] == 0.375);
+static_assert(kRationalDistortion.values[3] == 0.5);
+static_assert(kRationalDistortion.values[4] == 0.625);
+static_assert(kRationalDistortion.values[5] == 0.75);
+static_assert(kRationalDistortion.values[6] == 0.875);
+static_assert(kRationalDistortion.values[7] == 1.0);
+static_assert(kRationalDistortion.uses_rational_polynomial_extension);
+static_assert(!kRationalDistortion.requires_undistort_first);
+
 constexpr CameraTypes::FrameGeometry MakeWideGeometry()
 {
-  return {
-      .width = 720,
-      .height = 540,
-      .step = 2160,
-      .roi_offset_x_native = 0,
-      .roi_offset_y_native = 0,
-      .decimation_x = 2,
-      .decimation_y = 2,
-      .flags = CameraTypes::FRAME_GEOMETRY_NONE,
-      .reserved = 0,
-      .sample_phase_x_native = 0.0F,
-      .sample_phase_y_native = 0.0F,
-  };
+  return {720, 540, 2160, 0, 0, 2, 2, CameraTypes::FRAME_GEOMETRY_NONE, 0, 0.0F, 0.0F};
+}
+
+constexpr CameraTypes::FrameGeometry kLegacyWideGeometry{
+    17, 720, 540, 2160, 0, 0, 2, 2, CameraTypes::FRAME_GEOMETRY_NONE, 0, 0.0F, 0.0F};
+
+constexpr bool ExactGeometryFieldsEqual(const CameraTypes::FrameGeometry& lhs,
+                                        const CameraTypes::FrameGeometry& rhs)
+{
+  return lhs.width == rhs.width && lhs.height == rhs.height && lhs.step == rhs.step &&
+         lhs.roi_offset_x_native == rhs.roi_offset_x_native &&
+         lhs.roi_offset_y_native == rhs.roi_offset_y_native &&
+         lhs.decimation_x == rhs.decimation_x && lhs.decimation_y == rhs.decimation_y &&
+         lhs.flags == rhs.flags && lhs.reserved == rhs.reserved &&
+         lhs.sample_phase_x_native == rhs.sample_phase_x_native &&
+         lhs.sample_phase_y_native == rhs.sample_phase_y_native;
 }
 
 template <typename T>
@@ -80,6 +126,8 @@ concept HasEpochMember = requires(T value) { value.epoch; };
 
 static_assert(!HasEpochMember<CameraTypes::FrameGeometry>);
 static_assert(sizeof(CameraTypes::FrameGeometry) == 36U);
+static_assert(ExactGeometryFieldsEqual(MakeWideGeometry(), kLegacyWideGeometry));
+static_assert(CameraTypes::SameFrameGeometry(MakeWideGeometry(), kLegacyWideGeometry));
 
 void Expect(bool condition, const char* label)
 {
@@ -218,6 +266,77 @@ void TestProfileTypes()
   Expect(CameraTypes::SameFrameGeometry(applied.geometry, profiles[1].geometry),
          "applied profile geometry must be preserved");
 }
+
+void TestPnPDistortionContract()
+{
+  const auto expect_zero_values =
+      [](const CameraTypes::PnPDistCoeffs& distortion, const char* label)
+  {
+    for (double value : distortion.values)
+    {
+      ExpectNear(value, 0.0, label);
+    }
+  };
+
+  const auto none = CameraTypes::BuildPnPDistCoeffs(
+      MakeCalibrationWithDistortion(CameraTypes::DistortionModel::NONE));
+  Expect(none.size == 0U, "none must expose zero coefficients");
+  Expect(!none.uses_rational_polynomial_extension,
+         "none must not use the rational extension");
+  Expect(!none.requires_undistort_first,
+         "none must be accepted directly by the pinhole PnP path");
+  expect_zero_values(none, "none must not leak stored coefficients");
+
+  const auto plumb_bob = CameraTypes::BuildPnPDistCoeffs(
+      MakeCalibrationWithDistortion(CameraTypes::DistortionModel::PLUMB_BOB));
+  Expect(plumb_bob.size == 5U, "plumb_bob must expose five coefficients");
+  for (std::size_t i = 0; i < plumb_bob.values.size(); ++i)
+  {
+    const double expected =
+        i < plumb_bob.size ? static_cast<double>(i + 1U) * 0.125 : 0.0;
+    ExpectNear(plumb_bob.values[i], expected,
+               "plumb_bob coefficient order or unused storage");
+  }
+  Expect(!plumb_bob.uses_rational_polynomial_extension,
+         "plumb_bob must not use the rational extension");
+  Expect(!plumb_bob.requires_undistort_first,
+         "plumb_bob must be accepted directly by the pinhole PnP path");
+
+  const auto rational = CameraTypes::BuildPnPDistCoeffs(
+      MakeCalibrationWithDistortion(CameraTypes::DistortionModel::RATIONAL_POLYNOMIAL));
+  Expect(rational.size == 8U, "rational must expose eight coefficients");
+  for (std::size_t i = 0; i < rational.values.size(); ++i)
+  {
+    ExpectNear(rational.values[i], static_cast<double>(i + 1U) * 0.125,
+               "rational coefficient order");
+  }
+  Expect(rational.uses_rational_polynomial_extension,
+         "rational must advertise its eight-coefficient extension");
+  Expect(!rational.requires_undistort_first,
+         "rational must be accepted directly by the pinhole PnP path");
+
+  constexpr std::array unsupported_models{
+      CameraTypes::DistortionModel::EQUIDISTANT,
+      CameraTypes::DistortionModel::FOV,
+      CameraTypes::DistortionModel::OMNI,
+      CameraTypes::DistortionModel::EXTENDED_UNIFIED,
+      CameraTypes::DistortionModel::DOUBLE_SPHERE,
+      CameraTypes::DistortionModel::THIN_PRISM,
+      CameraTypes::DistortionModel::UNKNOWN,
+      static_cast<CameraTypes::DistortionModel>(0xFFU),
+  };
+  for (const auto model : unsupported_models)
+  {
+    const auto unsupported =
+        CameraTypes::BuildPnPDistCoeffs(MakeCalibrationWithDistortion(model));
+    Expect(unsupported.size == 0U, "unsupported model must expose zero coefficients");
+    Expect(!unsupported.uses_rational_polynomial_extension,
+           "unsupported model must not advertise the rational extension");
+    Expect(unsupported.requires_undistort_first,
+           "unsupported model must fail closed and require undistortion");
+    expect_zero_values(unsupported, "unsupported model must not leak coefficients");
+  }
+}
 }  // namespace
 
 int main()
@@ -227,5 +346,6 @@ int main()
   TestRoundTrip();
   TestValidationAndIdentity();
   TestProfileTypes();
+  TestPnPDistortionContract();
   return EXIT_SUCCESS;
 }

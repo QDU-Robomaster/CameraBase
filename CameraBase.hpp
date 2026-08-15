@@ -168,6 +168,40 @@ class CameraTypes
     uint16_t reserved{};             ///< ABI 保留字段，当前必须为 0。
     float sample_phase_x_native{};   ///< 第 0 列像素中心相对 ROI 起点的原生 x 相位。
     float sample_phase_y_native{};   ///< 第 0 行像素中心相对 ROI 起点的原生 y 相位。
+
+    constexpr FrameGeometry() = default;
+
+    constexpr FrameGeometry(uint32_t width, uint32_t height, uint32_t step,
+                            uint32_t roi_offset_x_native, uint32_t roi_offset_y_native,
+                            uint16_t decimation_x, uint16_t decimation_y, uint16_t flags,
+                            uint16_t reserved, float sample_phase_x_native,
+                            float sample_phase_y_native)
+        : width(width),
+          height(height),
+          step(step),
+          roi_offset_x_native(roi_offset_x_native),
+          roi_offset_y_native(roi_offset_y_native),
+          decimation_x(decimation_x),
+          decimation_y(decimation_y),
+          flags(flags),
+          reserved(reserved),
+          sample_phase_x_native(sample_phase_x_native),
+          sample_phase_y_native(sample_phase_y_native)
+    {
+    }
+
+    /** Accepts the pre-profile YAML layout while keeping epoch out of the ABI. */
+    constexpr FrameGeometry(uint32_t legacy_epoch, uint32_t width, uint32_t height,
+                            uint32_t step, uint32_t roi_offset_x_native,
+                            uint32_t roi_offset_y_native, uint16_t decimation_x,
+                            uint16_t decimation_y, uint16_t flags, uint16_t reserved,
+                            float sample_phase_x_native, float sample_phase_y_native)
+        : FrameGeometry(width, height, step, roi_offset_x_native, roi_offset_y_native,
+                        decimation_x, decimation_y, flags, reserved,
+                        sample_phase_x_native, sample_phase_y_native)
+    {
+      (void)legacy_epoch;
+    }
   };
 
   /**
