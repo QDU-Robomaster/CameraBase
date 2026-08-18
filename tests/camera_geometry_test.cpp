@@ -106,8 +106,23 @@ constexpr CameraTypes::FrameGeometry MakeWideGeometry()
   return {720, 540, 2160, 0, 0, 2, 2, CameraTypes::FRAME_GEOMETRY_NONE, 0, 0.0F, 0.0F};
 }
 
-constexpr CameraTypes::FrameGeometry kLegacyWideGeometry{
-    17, 720, 540, 2160, 0, 0, 2, 2, CameraTypes::FRAME_GEOMETRY_NONE, 0, 0.0F, 0.0F};
+constexpr CameraTypes::FrameGeometry MakeLegacyWideGeometry(uint32_t legacy_epoch)
+{
+  (void)legacy_epoch;
+  return {.width = 720,
+          .height = 540,
+          .step = 2160,
+          .roi_offset_x_native = 0,
+          .roi_offset_y_native = 0,
+          .decimation_x = 2,
+          .decimation_y = 2,
+          .flags = CameraTypes::FRAME_GEOMETRY_NONE,
+          .reserved = 0,
+          .sample_phase_x_native = 0.0F,
+          .sample_phase_y_native = 0.0F};
+}
+
+constexpr CameraTypes::FrameGeometry kLegacyWideGeometry = MakeLegacyWideGeometry(17U);
 
 constexpr bool ExactGeometryFieldsEqual(const CameraTypes::FrameGeometry& lhs,
                                         const CameraTypes::FrameGeometry& rhs)
@@ -125,6 +140,7 @@ template <typename T>
 concept HasEpochMember = requires(T value) { value.epoch; };
 
 static_assert(!HasEpochMember<CameraTypes::FrameGeometry>);
+static_assert(std::is_aggregate_v<CameraTypes::FrameGeometry>);
 static_assert(sizeof(CameraTypes::FrameGeometry) == 36U);
 static_assert(ExactGeometryFieldsEqual(MakeWideGeometry(), kLegacyWideGeometry));
 static_assert(CameraTypes::SameFrameGeometry(MakeWideGeometry(), kLegacyWideGeometry));
