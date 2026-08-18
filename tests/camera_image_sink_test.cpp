@@ -2,6 +2,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <iostream>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -47,9 +49,12 @@ constexpr Camera::FrameGeometry MakeNarrowGeometry()
 class TestCamera final : public Camera
 {
  public:
-  explicit TestCamera(LibXR::HardwareContainer& hw)
-      : Camera(hw, MakeCalibration(), "camera_base_profile_test",
-               "camera_base_profile_image_test", "camera_base_profile_imu_test")
+  explicit TestCamera(LibXR::HardwareContainer& hw,
+                      std::string_view name = "camera_base_profile_test",
+                      std::string_view image_topic_name =
+                          "camera_base_profile_image_test",
+                      std::string_view imu_topic_name = "camera_base_profile_imu_test")
+      : Camera(hw, MakeCalibration(), name, image_topic_name, imu_topic_name)
   {
   }
 
@@ -451,6 +456,18 @@ void TestDiscardWritableImage(TestCamera& camera)
   Expect(camera.AvailableImageSlots() == Camera::image_slot_count - 1U,
          "reacquired slot must again be held by the producer");
 }
+
+void TestNameRetention(const TestCamera& camera)
+{
+  Expect(camera.NameView() == "camera_base_profile_test",
+         "camera name must outlive the caller string");
+  Expect(camera.ImageTopicNameView() == "camera_base_profile_image_test",
+         "image topic name must outlive the caller string");
+  Expect(camera.ImuTopicNameView() == "camera_base_profile_imu_test",
+         "imu topic name must outlive the caller string");
+  Expect(std::string_view(camera.Name()) == camera.NameView(),
+         "camera C string and view must describe the same retained name");
+}
 }  // namespace
 
 int main()
@@ -467,7 +484,14 @@ int main()
 
   LibXR::RamFS ramfs;
   LibXR::HardwareContainer hw(LibXR::Entry<LibXR::RamFS>{ramfs, {"ramfs"}});
-  TestCamera camera(hw);
+  std::string name = "camera_base_profile_test";
+  std::string image_topic_name = "camera_base_profile_image_test";
+  std::string imu_topic_name = "camera_base_profile_imu_test";
+  TestCamera camera(hw, name, image_topic_name, imu_topic_name);
+  name = "modified_name";
+  image_topic_name = "modified_image_topic";
+  imu_topic_name = "modified_imu_topic";
+  TestNameRetention(camera);
   TestProfileInterface(camera);
   TestDiscardWritableImage(camera);
   Expect(Camera::CommandFun(&camera, 0, nullptr) == -1,
