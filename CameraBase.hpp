@@ -758,7 +758,7 @@ class SharedObjectPool
  * @class CameraBase
  * @brief 编译期绑定帧存储布局、运行期持有原生标定的相机生产者基类。
  *
- * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充本类八槽对象池中的
+ * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充本类两槽对象池中的
  * `ImageFrame`。`CommitImage()` 通过普通 topic 同步发布临时 `SharedFrame` 指针；
  * 订阅回调复制句柄后可把同一图像槽位交给异步线程，不复制图像字节。
  * 本类不负责记录、标定、预览、图像同步或坐标系转换。
@@ -807,8 +807,10 @@ class CameraBase
         std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
   };
 
-  /// CameraBase 进程内图像池的固定槽位数。
-  static constexpr std::size_t image_slot_count = 8U;
+  /// CameraBase 进程内图像池的固定槽位数，匹配当前流水线的两帧背压窗口。
+  static constexpr std::size_t image_slot_count = 2U;
+  static_assert(image_slot_count == 2U,
+                "CameraBase image pool capacity is part of the two-slot pipeline contract");
   /// CameraBase 自有的共享图像对象池。
   using ImagePool = CameraBaseDetail::SharedObjectPool<ImageFrame, image_slot_count>;
   /// 一个图像槽位的可复制进程内共享所有权句柄。
@@ -1004,7 +1006,7 @@ class CameraBase
   /**
    * @brief 获取生产者当前独占的可写图像槽位。
    *
-   * 若当前没有写槽位，本方法从八槽池中尝试获取一块。池中所有槽位仍被下游
+   * 若当前没有写槽位，本方法从两槽池中尝试获取一块。池中所有槽位仍被下游
    * `SharedFrame` 持有时返回 nullptr；下游释放任一槽位后，后续调用可再次成功。
    * 本方法和 `CommitImage()` 只能由同一个采集线程调用。
    */
@@ -1111,6 +1113,6 @@ class CameraBase
   LibXR::RamFS::File cmd_file_;          ///< 曝光/增益调试命令入口。
   LibXR::Topic image_topic_;             ///< 临时 `SharedFrame` 指针发布 topic。
   LibXR::Topic imu_topic_;               ///< 同步 IMU 发布 topic。
-  ImagePool image_pool_;                 ///< CameraBase 自有八槽图像池。
+  ImagePool image_pool_;                 ///< CameraBase 自有两槽图像池。
   SharedFrame writable_frame_;           ///< 生产者当前独占的可写槽位。
 };
