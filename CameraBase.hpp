@@ -19,12 +19,12 @@ depends: []
 #include <limits>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include "app_framework.hpp"
+#include "libxr_string.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "object_pool.hpp"
@@ -884,9 +884,10 @@ class CameraBase
    *
    * @param hw 硬件容器，必须包含名为 `ramfs` 的 `LibXR::RamFS`。
    * @param calibration 原生传感器坐标系下的不可变相机标定，按值持有。
-   * @param name 相机实例名，同时作为 RamFS 命令文件名。
-   * @param image_topic_name 图像逻辑 topic 名称。
-   * @param imu_topic_name 同步 IMU topic 名称，`PublishImu()` 会发布到该 topic。
+   * @param name 相机实例名，同时作为 RamFS 命令文件名；构造时复制并长期持有。
+   * @param image_topic_name 图像逻辑 topic 名称；构造时复制并长期持有。
+   * @param imu_topic_name 同步 IMU topic 名称；构造时复制并长期持有，`PublishImu()`
+   *        会发布到该 topic。
    */
   CameraBase(LibXR::HardwareContainer& hw, CameraCalibration calibration,
              std::string_view name = "camera",
@@ -896,10 +897,10 @@ class CameraBase
         name_(name),
         image_topic_name_(image_topic_name),
         imu_topic_name_(imu_topic_name),
-        cmd_file_(LibXR::RamFS::CreateFile(name_.c_str(), CommandFun, this)),
+        cmd_file_(LibXR::RamFS::CreateFile(name_.CStr(), CommandFun, this)),
         image_topic_(
-            LibXR::Topic::FindOrCreate<ImageTopicPayload>(image_topic_name_.c_str())),
-        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
+            LibXR::Topic::FindOrCreate<ImageTopicPayload>(image_topic_name_.CStr())),
+        imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.CStr()))
   {
     REQUIRE(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
     const auto result = image_pool_.Acquire(writable_frame_);
@@ -965,32 +966,32 @@ class CameraBase
   /**
    * @brief 返回相机实例名视图。
    */
-  std::string_view NameView() const { return name_; }
+  std::string_view NameView() const { return name_.View(); }
 
   /**
    * @brief 返回以空字符结尾的相机实例名。
    */
-  const char* Name() const { return name_.c_str(); }
+  const char* Name() const { return name_.CStr(); }
 
   /**
    * @brief 返回图像逻辑 topic 名称视图。
    */
-  std::string_view ImageTopicNameView() const { return image_topic_name_; }
+  std::string_view ImageTopicNameView() const { return image_topic_name_.View(); }
 
   /**
    * @brief 返回以空字符结尾的图像逻辑 topic 名称。
    */
-  const char* ImageTopicName() const { return image_topic_name_.c_str(); }
+  const char* ImageTopicName() const { return image_topic_name_.CStr(); }
 
   /**
    * @brief 返回同步 IMU topic 名称视图。
    */
-  std::string_view ImuTopicNameView() const { return imu_topic_name_; }
+  std::string_view ImuTopicNameView() const { return imu_topic_name_.View(); }
 
   /**
    * @brief 返回以空字符结尾的同步 IMU topic 名称。
    */
-  const char* ImuTopicName() const { return imu_topic_name_.c_str(); }
+  const char* ImuTopicName() const { return imu_topic_name_.CStr(); }
 
   /**
    * @brief 发布同步 IMU 数据。
@@ -1067,7 +1068,7 @@ class CameraBase
     const char* command = argc > 1 && argv != nullptr ? argv[1] : nullptr;
     if (argc == 1)
     {
-      LibXR::STDIO::Printf<"Camera: %s\n\n">(self->name_.c_str());
+      LibXR::STDIO::Printf<"Camera: %s\n\n">(self->Name());
       LibXR::STDIO::Printf<"用法:\r\n">();
       LibXR::STDIO::Printf<"  set_exposure <曝光>\r\n">();
       LibXR::STDIO::Printf<"  set_gain <增益>\r\n">();
@@ -1104,9 +1105,9 @@ class CameraBase
 
  private:
   const CameraCalibration calibration_;  ///< 构造期固定的原生相机标定。
-  std::string name_;                     ///< 相机实例名和 RamFS 命令文件名。
-  std::string image_topic_name_;         ///< 图像逻辑 topic 名称。
-  std::string imu_topic_name_;           ///< `PublishImu()` 发布同步 IMU 的 topic 名称。
+  LibXR::RuntimeStringView<> name_;       ///< 相机实例名和 RamFS 命令文件名。
+  LibXR::RuntimeStringView<> image_topic_name_;  ///< 图像逻辑 topic 名称。
+  LibXR::RuntimeStringView<> imu_topic_name_;  ///< `PublishImu()` 发布同步 IMU 的 topic。
   LibXR::RamFS::File cmd_file_;          ///< 曝光/增益调试命令入口。
   LibXR::Topic image_topic_;             ///< 临时 `SharedFrame` 指针发布 topic。
   LibXR::Topic imu_topic_;               ///< 同步 IMU 发布 topic。
