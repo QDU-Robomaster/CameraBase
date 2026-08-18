@@ -169,39 +169,6 @@ class CameraTypes
     float sample_phase_x_native{};   ///< 第 0 列像素中心相对 ROI 起点的原生 x 相位。
     float sample_phase_y_native{};   ///< 第 0 行像素中心相对 ROI 起点的原生 y 相位。
 
-    constexpr FrameGeometry() = default;
-
-    constexpr FrameGeometry(uint32_t width, uint32_t height, uint32_t step,
-                            uint32_t roi_offset_x_native, uint32_t roi_offset_y_native,
-                            uint16_t decimation_x, uint16_t decimation_y, uint16_t flags,
-                            uint16_t reserved, float sample_phase_x_native,
-                            float sample_phase_y_native)
-        : width(width),
-          height(height),
-          step(step),
-          roi_offset_x_native(roi_offset_x_native),
-          roi_offset_y_native(roi_offset_y_native),
-          decimation_x(decimation_x),
-          decimation_y(decimation_y),
-          flags(flags),
-          reserved(reserved),
-          sample_phase_x_native(sample_phase_x_native),
-          sample_phase_y_native(sample_phase_y_native)
-    {
-    }
-
-    /** Accepts the pre-profile YAML layout while keeping epoch out of the ABI. */
-    constexpr FrameGeometry(uint32_t legacy_epoch, uint32_t width, uint32_t height,
-                            uint32_t step, uint32_t roi_offset_x_native,
-                            uint32_t roi_offset_y_native, uint16_t decimation_x,
-                            uint16_t decimation_y, uint16_t flags, uint16_t reserved,
-                            float sample_phase_x_native, float sample_phase_y_native)
-        : FrameGeometry(width, height, step, roi_offset_x_native, roi_offset_y_native,
-                        decimation_x, decimation_y, flags, reserved,
-                        sample_phase_x_native, sample_phase_y_native)
-    {
-      (void)legacy_epoch;
-    }
   };
 
   /**
@@ -231,6 +198,7 @@ class CameraTypes
   static_assert(std::is_trivially_copyable_v<CameraCalibration>);
   static_assert(std::is_standard_layout_v<CameraCalibration>);
   static_assert(std::is_aggregate_v<CameraCalibration>);
+  static_assert(std::is_aggregate_v<FrameGeometry>);
   static_assert(std::is_trivially_copyable_v<FrameGeometry>);
   static_assert(std::is_standard_layout_v<FrameGeometry>);
   static_assert(std::is_trivially_copyable_v<CameraProfile>);
@@ -933,9 +901,9 @@ class CameraBase
             LibXR::Topic::FindOrCreate<ImageTopicPayload>(image_topic_name_.c_str())),
         imu_topic_(LibXR::Topic::FindOrCreate<ImuStamped>(imu_topic_name_.c_str()))
   {
-    ASSERT(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
+    REQUIRE(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
     const auto result = image_pool_.Acquire(writable_frame_);
-    ASSERT(result == LibXR::ErrorCode::OK);
+    REQUIRE(result == LibXR::ErrorCode::OK);
     hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
   }
 
@@ -1096,6 +1064,7 @@ class CameraBase
    */
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
+    const char* command = argc > 1 && argv != nullptr ? argv[1] : nullptr;
     if (argc == 1)
     {
       LibXR::STDIO::Printf<"Camera: %s\n\n">(self->name_.c_str());
@@ -1104,21 +1073,21 @@ class CameraBase
       LibXR::STDIO::Printf<"  set_gain <增益>\r\n">();
       return 0;
     }
-    else if (argc == 3)
+    else if (argc == 3 && command != nullptr && argv[2] != nullptr)
     {
-      if (strcmp(argv[1], "set_exposure") == 0)
+      if (strcmp(command, "set_exposure") == 0)
       {
         self->SetExposure(atof(argv[2]));
         return 0;
       }
-      if (strcmp(argv[1], "set_gain") == 0)
+      if (strcmp(command, "set_gain") == 0)
       {
         self->SetGain(atof(argv[2]));
         return 0;
       }
     }
 
-    LibXR::STDIO::Printf<"未知命令：%s\n">(argv[1]);
+    LibXR::STDIO::Printf<"未知命令：%s\n">(command != nullptr ? command : "");
     return -1;
   }
 

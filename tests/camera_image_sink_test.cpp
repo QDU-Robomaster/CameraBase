@@ -470,6 +470,8 @@ int main()
   TestCamera camera(hw);
   TestProfileInterface(camera);
   TestDiscardWritableImage(camera);
+  Expect(Camera::CommandFun(&camera, 0, nullptr) == -1,
+         "an empty RamFS command must fail without dereferencing argv");
 
   // PlatformInit 的 STDIO 线程按进程生命周期运行；不要在测试退出时伪造并发 teardown。
   std::_Exit(EXIT_SUCCESS);
