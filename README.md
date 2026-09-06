@@ -1,7 +1,7 @@
 # CameraBase
 
 CameraBase 提供相机模块共用的 C++ 类型，以及单进程内的共享图像所有权协议。它拥有
-八个固定图像槽，但不打开相机、不保存消息队列，也不创建工作线程。
+两个固定图像槽，但不打开相机、不保存消息队列，也不创建工作线程。
 
 ## 类型
 
@@ -72,7 +72,7 @@ native = roi_offset + sample_phase + decimation * oriented
 
 ## 发布契约
 
-CameraBase 使用 `LibXR::MPMCObjectPool<ImageFrame>` 管理八个进程内图像槽。相机
+CameraBase 使用 `LibXR::MPMCObjectPool<ImageFrame>` 管理两个进程内图像槽。相机
 生产和发布顺序是：
 
 1. 相机调用 `GetWritableImage()`
@@ -104,7 +104,7 @@ CameraBase 私有图像池授予当前唯一生产者；生产者调用 `CommitI
 写指针，写权限不会随 topic 中的句柄传播到下游。
 
 `CommitImage()` 返回 true 表示当前帧已经完成同步发布，返回值不再描述下一槽位。
-下一次 `GetWritableImage()` 会按需获取槽位；八个槽都仍被下游持有时返回 nullptr，
+下一次 `GetWritableImage()` 会按需获取槽位；两个槽都仍被下游持有时返回 nullptr，
 任一持有者释放后即可恢复。没有订阅者时，发布结束即归还当前槽位。
 
 派生驱动在采集线程确认停流后、切档前可调用受保护的 `DiscardWritableImage()`，立即
@@ -200,6 +200,6 @@ if (!CommitImage()) {
   `ImuStamped` 固定为 64 字节
 - 上述载荷布局属于 ABI；所有参与模块必须使用同一 CameraBase 版本重编译，并随同一
   进程一起重启，不能和旧布局混用
-- CameraBase 保存八个固定图像槽和一个当前可写句柄，不保存消息队列
+- CameraBase 保存两个固定图像槽和一个当前可写句柄，不保存消息队列
 - `SharedFrame` 只用于单进程共享所有权，不可序列化或跨进程传递
 - 原生内参放在不可变 `CameraCalibration`，相机外参不放在这里
