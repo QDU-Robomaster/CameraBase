@@ -3,10 +3,8 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: 相机基础类型、像素编码和图像/IMU 数据结构
-constructor_args: []
-template_args: []
-required_hardware: []
 depends: []
+standalone: false
 === END MANIFEST === */
 // clang-format on
 
@@ -23,7 +21,7 @@ depends: []
 #include <type_traits>
 #include <utility>
 
-#include "app_framework.hpp"
+#include "libxr_def.hpp"
 #include "libxr_string.hpp"
 #include "logger.hpp"
 #include "message.hpp"
@@ -168,7 +166,6 @@ class CameraTypes
     uint16_t reserved{};             ///< ABI 保留字段，当前必须为 0。
     float sample_phase_x_native{};   ///< 第 0 列像素中心相对 ROI 起点的原生 x 相位。
     float sample_phase_y_native{};   ///< 第 0 行像素中心相对 ROI 起点的原生 y 相位。
-
   };
 
   /**
@@ -809,8 +806,9 @@ class CameraBase
 
   /// CameraBase 进程内图像池的固定槽位数，匹配当前流水线的两帧背压窗口。
   static constexpr std::size_t image_slot_count = 2U;
-  static_assert(image_slot_count == 2U,
-                "CameraBase image pool capacity is part of the two-slot pipeline contract");
+  static_assert(
+      image_slot_count == 2U,
+      "CameraBase image pool capacity is part of the two-slot pipeline contract");
   /// CameraBase 自有的共享图像对象池。
   using ImagePool = CameraBaseDetail::SharedObjectPool<ImageFrame, image_slot_count>;
   /// 一个图像槽位的可复制进程内共享所有权句柄。
@@ -884,14 +882,13 @@ class CameraBase
   /**
    * @brief 构造相机基础对象并注册调试命令文件。
    *
-   * @param hw 硬件容器，必须包含名为 `ramfs` 的 `LibXR::RamFS`。
    * @param calibration 原生传感器坐标系下的不可变相机标定，按值持有。
    * @param name 相机实例名，同时作为 RamFS 命令文件名；构造时复制并长期持有。
    * @param image_topic_name 图像逻辑 topic 名称；构造时复制并长期持有。
    * @param imu_topic_name 同步 IMU topic 名称；构造时复制并长期持有，`PublishImu()`
    *        会发布到该 topic。
    */
-  CameraBase(LibXR::HardwareContainer& hw, CameraCalibration calibration,
+  CameraBase(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
              std::string_view name = "camera",
              std::string_view image_topic_name = "camera_image",
              std::string_view imu_topic_name = "camera_imu")
@@ -907,7 +904,7 @@ class CameraBase
     REQUIRE(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
     const auto result = image_pool_.Acquire(writable_frame_);
     REQUIRE(result == LibXR::ErrorCode::OK);
-    hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+    external_ramfs.Add(cmd_file_);
   }
 
   CameraBase(const CameraBase&) = delete;
@@ -1106,13 +1103,13 @@ class CameraBase
   void DiscardWritableImage() noexcept { writable_frame_.Reset(); }
 
  private:
-  const CameraCalibration calibration_;  ///< 构造期固定的原生相机标定。
-  LibXR::RuntimeStringView<> name_;       ///< 相机实例名和 RamFS 命令文件名。
+  const CameraCalibration calibration_;          ///< 构造期固定的原生相机标定。
+  LibXR::RuntimeStringView<> name_;              ///< 相机实例名和 RamFS 命令文件名。
   LibXR::RuntimeStringView<> image_topic_name_;  ///< 图像逻辑 topic 名称。
   LibXR::RuntimeStringView<> imu_topic_name_;  ///< `PublishImu()` 发布同步 IMU 的 topic。
-  LibXR::RamFS::File cmd_file_;          ///< 曝光/增益调试命令入口。
-  LibXR::Topic image_topic_;             ///< 临时 `SharedFrame` 指针发布 topic。
-  LibXR::Topic imu_topic_;               ///< 同步 IMU 发布 topic。
-  ImagePool image_pool_;                 ///< CameraBase 自有两槽图像池。
-  SharedFrame writable_frame_;           ///< 生产者当前独占的可写槽位。
+  LibXR::RamFS::File cmd_file_;                ///< 曝光/增益调试命令入口。
+  LibXR::Topic image_topic_;                   ///< 临时 `SharedFrame` 指针发布 topic。
+  LibXR::Topic imu_topic_;                     ///< 同步 IMU 发布 topic。
+  ImagePool image_pool_;                       ///< CameraBase 自有两槽图像池。
+  SharedFrame writable_frame_;                 ///< 生产者当前独占的可写槽位。
 };
