@@ -882,13 +882,14 @@ class CameraBase
   /**
    * @brief 构造相机基础对象并注册调试命令文件。
    *
+   * @param ramfs 注册调试命令文件的 RamFS。
    * @param calibration 原生传感器坐标系下的不可变相机标定，按值持有。
    * @param name 相机实例名，同时作为 RamFS 命令文件名；构造时复制并长期持有。
    * @param image_topic_name 图像逻辑 topic 名称；构造时复制并长期持有。
    * @param imu_topic_name 同步 IMU topic 名称；构造时复制并长期持有，`PublishImu()`
    *        会发布到该 topic。
    */
-  CameraBase(LibXR::RamFS& external_ramfs, CameraCalibration calibration,
+  CameraBase(LibXR::RamFS& ramfs, CameraCalibration calibration,
              std::string_view name = "camera",
              std::string_view image_topic_name = "camera_image",
              std::string_view imu_topic_name = "camera_imu")
@@ -904,7 +905,7 @@ class CameraBase
     REQUIRE(CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_));
     const auto result = image_pool_.Acquire(writable_frame_);
     REQUIRE(result == LibXR::ErrorCode::OK);
-    external_ramfs.Add(cmd_file_);
+    ramfs.Add(cmd_file_);
   }
 
   CameraBase(const CameraBase&) = delete;

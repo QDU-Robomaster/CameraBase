@@ -51,10 +51,10 @@ class TestCamera final : public Camera
 {
  public:
   explicit TestCamera(
-      LibXR::RamFS& external_ramfs, std::string_view name = "camera_base_profile_test",
+      LibXR::RamFS& ramfs, std::string_view name = "camera_base_profile_test",
       std::string_view image_topic_name = "camera_base_profile_image_test",
       std::string_view imu_topic_name = "camera_base_profile_imu_test")
-      : Camera(external_ramfs, MakeCalibration(), name, image_topic_name, imu_topic_name)
+      : Camera(ramfs, MakeCalibration(), name, image_topic_name, imu_topic_name)
   {
   }
 
