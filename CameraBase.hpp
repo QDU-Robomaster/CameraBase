@@ -31,9 +31,13 @@ standalone: false
 /**
  * @class CameraTypes
  * @brief 相机相关的纯类型定义容器。
+ *        Container of camera-related pure type definitions.
  *
  * 本类不保存运行时状态。视觉链路中各模块通过这些类型共享图像像素格式、
  * 帧存储布局、原生相机标定、逐帧采样几何和同步 IMU 数据格式。
+ * The class holds no runtime state. Modules in the vision chain share the pixel
+ * format, frame storage layout, native camera calibration, per-frame sampling
+ * geometry and synchronized IMU format through these types.
  */
 class CameraTypes
 {
@@ -41,152 +45,181 @@ class CameraTypes
   /**
    * @enum Encoding
    * @brief 图像像素编码格式。
+   *        Image pixel encoding.
    *
-   * 多字节通道值使用目标平台原生字节序。`step` 字段负责描述每行实际字节数，
-   * 因此消费者不能从 `width` 和 `Encoding` 反推出行跨度。
+   * 多字节通道值使用目标平台原生字节序。行跨度由 `step` 字段给出，
+   * 不由 `width` 和 `Encoding` 推算。`YUV422` 的字节顺序由图像源约定。
+   * Multi-byte channel values use the native byte order of the target platform.
+   * The row stride is given by `step` and is not derived from `width` and
+   * `Encoding`. The byte order of `YUV422` is set by the image source.
    */
   enum Encoding : uint8_t
   {
-    INVALID = 0,   ///< 无效或未初始化的编码占位。
-    RGB8,          ///< 8 位 RGB 三通道。
-    BGR8,          ///< 8 位 BGR 三通道。
-    RGBA8,         ///< 8 位 RGBA 四通道。
-    BGRA8,         ///< 8 位 BGRA 四通道。
-    RGB16,         ///< 16 位 RGB 三通道。
-    BGR16,         ///< 16 位 BGR 三通道。
-    RGBA16,        ///< 16 位 RGBA 四通道。
-    BGRA16,        ///< 16 位 BGRA 四通道。
-    MONO8,         ///< 8 位单通道灰度图。
-    MONO16,        ///< 16 位单通道灰度图。
-    BAYER_RGGB8,   ///< 8 位 Bayer，RGGB 排列。
-    BAYER_GRBG8,   ///< 8 位 Bayer，GRBG 排列。
-    BAYER_GBRG8,   ///< 8 位 Bayer，GBRG 排列。
-    BAYER_BGGR8,   ///< 8 位 Bayer，BGGR 排列。
-    BAYER_RGGB16,  ///< 16 位 Bayer，RGGB 排列。
-    BAYER_GRBG16,  ///< 16 位 Bayer，GRBG 排列。
-    BAYER_GBRG16,  ///< 16 位 Bayer，GBRG 排列。
-    BAYER_BGGR16,  ///< 16 位 Bayer，BGGR 排列。
-    YUV422         ///< 打包 YUV 4:2:2；具体字节顺序由图像源约定。
+    INVALID = 0,   ///< 无效或未初始化 Invalid or uninitialized
+    RGB8,          ///< 8 位 RGB 8-bit RGB
+    BGR8,          ///< 8 位 BGR 8-bit BGR
+    RGBA8,         ///< 8 位 RGBA 8-bit RGBA
+    BGRA8,         ///< 8 位 BGRA 8-bit BGRA
+    RGB16,         ///< 16 位 RGB 16-bit RGB
+    BGR16,         ///< 16 位 BGR 16-bit BGR
+    RGBA16,        ///< 16 位 RGBA 16-bit RGBA
+    BGRA16,        ///< 16 位 BGRA 16-bit BGRA
+    MONO8,         ///< 8 位灰度 8-bit grayscale
+    MONO16,        ///< 16 位灰度 16-bit grayscale
+    BAYER_RGGB8,   ///< 8 位 Bayer RGGB 8-bit Bayer RGGB
+    BAYER_GRBG8,   ///< 8 位 Bayer GRBG 8-bit Bayer GRBG
+    BAYER_GBRG8,   ///< 8 位 Bayer GBRG 8-bit Bayer GBRG
+    BAYER_BGGR8,   ///< 8 位 Bayer BGGR 8-bit Bayer BGGR
+    BAYER_RGGB16,  ///< 16 位 Bayer RGGB 16-bit Bayer RGGB
+    BAYER_GRBG16,  ///< 16 位 Bayer GRBG 16-bit Bayer GRBG
+    BAYER_GBRG16,  ///< 16 位 Bayer GBRG 16-bit Bayer GBRG
+    BAYER_BGGR16,  ///< 16 位 Bayer BGGR 16-bit Bayer BGGR
+    YUV422         ///< 打包 YUV 4:2:2 Packed YUV 4:2:2
   };
 
   /**
    * @enum DistortionModel
    * @brief 相机畸变模型。
+   *        Camera distortion model.
    *
    * 枚举值用于解释 `CameraCalibration::distortion_coefficients` 的含义。PnP 直通路径
    * 消费 pinhole 常用模型，其它模型由调用方先完成去畸变。
+   * The value selects how `CameraCalibration::distortion_coefficients` is read. The
+   * PnP pass-through path consumes the common pinhole models; the caller undistorts
+   * for the other models first.
    */
   enum class DistortionModel : uint8_t
   {
-    NONE = 0,             ///< 无畸变模型。
-    PLUMB_BOB,            ///< Brown-Conrady / plumb_bob。
-    RATIONAL_POLYNOMIAL,  ///< OpenCV 扩展有理多项式模型。
-    EQUIDISTANT,          ///< 等距鱼眼模型。
-    FOV,                  ///< FOV 畸变模型。
-    OMNI,                 ///< 统一全向模型。
-    EXTENDED_UNIFIED,     ///< 扩展统一相机模型。
-    DOUBLE_SPHERE,        ///< 双球模型。
-    THIN_PRISM,           ///< 薄棱镜模型。
-    UNKNOWN               ///< 未知或自定义模型。
+    NONE = 0,             ///< 无畸变 No distortion
+    PLUMB_BOB,            ///< Brown-Conrady / plumb_bob 模型 model
+    RATIONAL_POLYNOMIAL,  ///< OpenCV 扩展有理多项式 OpenCV extended rational polynomial
+    EQUIDISTANT,          ///< 等距鱼眼 Equidistant fisheye
+    FOV,                  ///< FOV 模型 FOV model
+    OMNI,                 ///< 统一全向 Unified omnidirectional
+    EXTENDED_UNIFIED,     ///< 扩展统一相机 Extended unified camera
+    DOUBLE_SPHERE,        ///< 双球 Double sphere
+    THIN_PRISM,           ///< 薄棱镜 Thin prism
+    UNKNOWN               ///< 未知或自定义 Unknown or custom
   };
 
   /**
    * @struct FrameLayout
    * @brief 编译期固定的图像尺寸、行跨度、存储容量和像素编码。
+   *        Compile-time image size, row stride, storage capacity and pixel encoding.
    *
    * `width`、`height` 和 `step` 同时定义每帧有效布局与 `ImageFrame::data` 容量。
-   * `FrameGeometry` 必须保持这三个字段相同，仅描述 ROI、采样和方向关系；编码在同一
+   * `FrameGeometry` 的这三个字段与之相同，仅描述 ROI、采样和方向关系；编码在同一
    * 模板实例内保持不变。
+   * `width`, `height` and `step` define both the valid layout of each frame and the
+   * capacity of `ImageFrame::data`. `FrameGeometry` carries the same three fields
+   * and describes only ROI, sampling and orientation; the encoding is fixed within
+   * one template instance.
    */
   struct FrameLayout
   {
-    uint32_t width{};     ///< 每帧有效宽度，单位像素。
-    uint32_t height{};    ///< 每帧有效高度，单位像素。
-    uint32_t step{};      ///< 每帧行跨度，单位字节。
-    Encoding encoding{};  ///< 整个模板实例固定的像素编码。
+    uint32_t width{};     ///< 有效宽度，单位像素 Valid width in pixels
+    uint32_t height{};    ///< 有效高度，单位像素 Valid height in pixels
+    uint32_t step{};      ///< 行跨度，单位字节 Row stride in bytes
+    Encoding encoding{};  ///< 像素编码 Pixel encoding
   };
 
   /**
    * @struct CameraCalibration
    * @brief 原生传感器坐标系下的不可变运行时标定。
+   *        Immutable runtime calibration in native sensor coordinates.
    *
-   * 数组均按行优先存储。该结构不描述 ROI、下采样或翻转；这些逐帧采样关系由
-   * `FrameGeometry` 携带。
+   * 数组均按行优先存储，`distortion_coefficients` 的布局跟随 ROS CameraInfo。
+   * ROI、下采样和翻转等逐帧采样关系由 `FrameGeometry` 携带。
+   * All arrays are stored in row-major order, and `distortion_coefficients` follows
+   * the ROS CameraInfo layout. Per-frame sampling relations such as ROI, decimation
+   * and flipping are carried by `FrameGeometry`.
    */
   struct CameraCalibration
   {
-    uint32_t native_width{};                ///< 标定使用的原生传感器宽度，单位像素。
-    uint32_t native_height{};               ///< 标定使用的原生传感器高度，单位像素。
-    std::array<double, 9> camera_matrix{};  ///< 3x3 原生相机内参矩阵 K。
-    DistortionModel distortion_model{};     ///< 畸变模型类型。
+    uint32_t native_width{};   ///< 原生传感器宽度，像素 Native sensor width, px
+    uint32_t native_height{};  ///< 原生传感器高度，像素 Native sensor height, px
+    std::array<double, 9> camera_matrix{};  ///< 3x3 内参矩阵 K 3x3 intrinsic matrix K
+    DistortionModel distortion_model{};     ///< 畸变模型 Distortion model
     std::array<double, 14>
-        distortion_coefficients{};  ///< 畸变参数，布局跟随 ROS CameraInfo。
-    std::array<double, 9> rectification_matrix{};  ///< 3x3 校正旋转矩阵 R。
-    std::array<double, 12> projection_matrix{};    ///< 3x4 原生投影矩阵 P。
+        distortion_coefficients{};                 ///< 畸变系数 Distortion coefficients
+    std::array<double, 9> rectification_matrix{};  ///< 3x3 校正矩阵 R 3x3 rectification R
+    std::array<double, 12> projection_matrix{};    ///< 3x4 投影矩阵 P 3x4 projection P
   };
 
   /**
    * @enum FrameGeometryFlags
-   * @brief 从帧坐标映射回原生传感器坐标时使用的离散变换。
+   * @brief 从帧坐标映射回原生传感器坐标时使用的翻转标志。
+   *        Flip flags used when mapping frame coordinates back to native sensor
+   *        coordinates.
    */
   enum FrameGeometryFlags : uint16_t
   {
-    FRAME_GEOMETRY_NONE = 0,
-    FRAME_GEOMETRY_REVERSE_X = 1U << 0,
-    FRAME_GEOMETRY_REVERSE_Y = 1U << 1,
+    FRAME_GEOMETRY_NONE = 0,             ///< 无翻转 No flip
+    FRAME_GEOMETRY_REVERSE_X = 1U << 0,  ///< 横向翻转 Horizontal flip
+    FRAME_GEOMETRY_REVERSE_Y = 1U << 1,  ///< 纵向翻转 Vertical flip
   };
 
   /**
    * @enum ProfileId
    * @brief 相机支持的固定采样档位标识。
+   *        Identifier of a fixed sampling profile supported by the camera.
    */
   enum class ProfileId : uint8_t
   {
-    WIDE = 0,  ///< 宽视场档位。
-    NARROW,    ///< 窄视场档位。
+    WIDE = 0,  ///< 宽视场档位 Wide field of view
+    NARROW,    ///< 窄视场档位 Narrow field of view
   };
 
   /**
    * @struct FrameGeometry
    * @brief 一帧图像相对原生传感器坐标系的采样关系。
+   *        Sampling relation of one frame to the native sensor coordinates.
    *
    * `roi_offset_*_native` 和 `sample_phase_*_native` 均使用原生像素中心坐标。
    * 结构按值进入 `ImageFrame`，是标准布局、可平凡复制的类型。
+   * `roi_offset_*_native` and `sample_phase_*_native` use native pixel-center
+   * coordinates. The struct enters `ImageFrame` by value and is standard-layout and
+   * trivially copyable.
    */
   struct FrameGeometry
   {
-    uint32_t width{};                ///< 当前帧有效宽度，单位像素。
-    uint32_t height{};               ///< 当前帧有效高度，单位像素。
-    uint32_t step{};                 ///< 当前帧有效行跨度，单位字节。
-    uint32_t roi_offset_x_native{};  ///< ROI 左上角在原生传感器中的 x 偏移。
-    uint32_t roi_offset_y_native{};  ///< ROI 左上角在原生传感器中的 y 偏移。
-    uint16_t decimation_x{};         ///< 横向相邻帧像素对应的原生像素间距。
-    uint16_t decimation_y{};         ///< 纵向相邻帧像素对应的原生像素间距。
-    uint16_t flags{};                ///< `FrameGeometryFlags` 位集合。
-    uint16_t reserved{};             ///< ABI 保留字段，必须为 0。
-    float sample_phase_x_native{};   ///< 第 0 列像素中心相对 ROI 起点的原生 x 相位。
-    float sample_phase_y_native{};   ///< 第 0 行像素中心相对 ROI 起点的原生 y 相位。
+    uint32_t width{};                ///< 帧宽，像素 Frame width, px
+    uint32_t height{};               ///< 帧高，像素 Frame height, px
+    uint32_t step{};                 ///< 行跨度，字节 Row stride, bytes
+    uint32_t roi_offset_x_native{};  ///< ROI 左上角原生 x 偏移 ROI origin x, native px
+    uint32_t roi_offset_y_native{};  ///< ROI 左上角原生 y 偏移 ROI origin y, native px
+    uint16_t decimation_x{};         ///< 横向像素间距，原生像素 X pitch, native px
+    uint16_t decimation_y{};         ///< 纵向像素间距，原生像素 Y pitch, native px
+    uint16_t flags{};                ///< `FrameGeometryFlags` 位集合 Bit set of flags
+    uint16_t reserved{};             ///< ABI 保留，必须为 0 ABI reserved, must be 0
+    float sample_phase_x_native{};   ///< 第 0 列相对 ROI 起点的 x 相位 Column-0 x phase
+    float sample_phase_y_native{};   ///< 第 0 行相对 ROI 起点的 y 相位 Row-0 y phase
   };
 
   /**
    * @struct CameraProfile
    * @brief 相机驱动公开的一个固定采样档位。
+   *        One fixed sampling profile exposed by a camera driver.
+   *
+   * `trigger_period_us` 非零。
+   * `trigger_period_us` is non-zero.
    */
   struct CameraProfile
   {
-    ProfileId id{ProfileId::WIDE};  ///< 档位标识。
-    FrameGeometry geometry{};       ///< 该档位成功生效后的逐帧几何。
-    uint32_t trigger_period_us{};   ///< 该档位要求的触发周期，单位微秒且必须非零。
+    ProfileId id{ProfileId::WIDE};  ///< 档位标识 Profile identifier
+    FrameGeometry geometry{};       ///< 生效后的逐帧几何 Geometry once applied
+    uint32_t trigger_period_us{};   ///< 触发周期，微秒 Trigger period, us
   };
 
   /**
    * @struct AppliedProfile
    * @brief 驱动成功切档后实际生效的档位快照。
+   *        Snapshot of the profile in effect after a successful switch.
    */
   struct AppliedProfile
   {
-    ProfileId id{ProfileId::WIDE};  ///< 实际生效的档位标识。
-    FrameGeometry geometry{};       ///< 后续图像逐帧携带的实际几何。
+    ProfileId id{ProfileId::WIDE};  ///< 实际生效的档位标识 Profile identifier in effect
+    FrameGeometry geometry{};       ///< 后续图像携带的几何 Geometry of following frames
   };
 
   static_assert(sizeof(FrameGeometry) == 36, "CameraTypes::FrameGeometry ABI changed");
@@ -204,7 +237,13 @@ class CameraTypes
   static_assert(std::is_standard_layout_v<AppliedProfile>);
 
   /**
-   * @brief 返回固定编码下每个像素占用的字节数；不支持的编码返回 0。
+   * @brief 返回固定编码下每个像素占用的字节数。
+   *        Return the bytes per pixel of an encoding.
+   *
+   * @param encoding 像素编码。
+   *                 Pixel encoding.
+   * @return 每像素字节数；不支持的编码返回 0。
+   *         Bytes per pixel; 0 for an unsupported encoding.
    */
   [[nodiscard]] static constexpr uint32_t BytesPerPixel(Encoding encoding)
   {
@@ -242,7 +281,18 @@ class CameraTypes
   }
 
   /**
-   * @brief 检查编译期帧容量是否自洽且不会溢出 `size_t`。
+   * @brief 检查帧布局的容量是否自洽且不会溢出 `size_t`。
+   *        Check that the frame layout capacity is self-consistent and does not
+   *        overflow `size_t`.
+   *
+   * 宽高和 `step` 非零，编码有效，`step` 不小于一行像素的字节数，`YUV422` 的宽度为偶数。
+   * Width, height and `step` are non-zero, the encoding is valid, `step` is at least
+   * the bytes of one pixel row, and the width of `YUV422` is even.
+   *
+   * @param layout 待检查的帧布局。
+   *               Frame layout to check.
+   * @return 布局有效返回 true。
+   *         True when the layout is valid.
    */
   [[nodiscard]] static constexpr bool ValidateFrameLayout(const FrameLayout& layout)
   {
@@ -257,6 +307,17 @@ class CameraTypes
 
   /**
    * @brief 判断逐帧几何是否能由给定缓冲区承载并落在原生标定范围内。
+   *        Check that a per-frame geometry fits the given buffer and lies inside the
+   *        native calibration range.
+   *
+   * @param layout 帧存储布局。
+   *               Frame storage layout.
+   * @param calibration 原生相机标定。
+   *                    Native camera calibration.
+   * @param geometry 待检查的逐帧几何。
+   *                 Per-frame geometry to check.
+   * @return 几何有效返回 true。
+   *         True when the geometry is valid.
    */
   [[nodiscard]] static constexpr bool ValidateFrameGeometry(
       const FrameLayout& layout, const CameraCalibration& calibration,
@@ -300,7 +361,16 @@ class CameraTypes
   }
 
   /**
-   * @brief 比较两个逐帧几何快照是否描述完全相同的采样关系。
+   * @brief 逐字段比较两个逐帧几何（不含保留字段）。
+   *        Compare two per-frame geometries field by field, excluding the reserved
+   *        field.
+   *
+   * @param lhs 第一个几何。
+   *            First geometry.
+   * @param rhs 第二个几何。
+   *            Second geometry.
+   * @return 各字段相同返回 true。
+   *         True when all compared fields are equal.
    */
   [[nodiscard]] static constexpr bool SameFrameGeometry(const FrameGeometry& lhs,
                                                         const FrameGeometry& rhs)
@@ -314,12 +384,34 @@ class CameraTypes
            lhs.sample_phase_y_native == rhs.sample_phase_y_native;
   }
 
+  /**
+   * @brief 判断几何是否设置了指定翻转标志。
+   *        Check whether a geometry has the given flip flag set.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param flag 待检查的标志。
+   *             Flag to check.
+   * @return 已设置返回 true。
+   *         True when the flag is set.
+   */
   [[nodiscard]] static constexpr bool HasGeometryFlag(const FrameGeometry& geometry,
                                                       FrameGeometryFlags flag)
   {
     return (geometry.flags & static_cast<uint16_t>(flag)) != 0;
   }
 
+  /**
+   * @brief 把帧内 x 坐标映射到原生传感器 x 坐标。
+   *        Map a frame x coordinate to the native sensor x coordinate.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param frame_x 帧内 x 坐标，单位像素。
+   *                Frame x coordinate in pixels.
+   * @return 原生传感器 x 坐标，单位像素。
+   *         Native sensor x coordinate in pixels.
+   */
   [[nodiscard]] static constexpr double FrameToNativeX(const FrameGeometry& geometry,
                                                        double frame_x)
   {
@@ -331,6 +423,17 @@ class CameraTypes
            static_cast<double>(geometry.decimation_x) * oriented_x;
   }
 
+  /**
+   * @brief 把帧内 y 坐标映射到原生传感器 y 坐标。
+   *        Map a frame y coordinate to the native sensor y coordinate.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param frame_y 帧内 y 坐标，单位像素。
+   *                Frame y coordinate in pixels.
+   * @return 原生传感器 y 坐标，单位像素。
+   *         Native sensor y coordinate in pixels.
+   */
   [[nodiscard]] static constexpr double FrameToNativeY(const FrameGeometry& geometry,
                                                        double frame_y)
   {
@@ -342,12 +445,36 @@ class CameraTypes
            static_cast<double>(geometry.decimation_y) * oriented_y;
   }
 
+  /**
+   * @brief 把帧内坐标映射到原生传感器坐标。
+   *        Map frame coordinates to native sensor coordinates.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param frame_x 帧内 x 坐标，单位像素。
+   *                Frame x coordinate in pixels.
+   * @param frame_y 帧内 y 坐标，单位像素。
+   *                Frame y coordinate in pixels.
+   * @return 原生传感器坐标 {x, y}，单位像素。
+   *         Native sensor coordinates {x, y} in pixels.
+   */
   [[nodiscard]] static constexpr std::array<double, 2> FrameToNative(
       const FrameGeometry& geometry, double frame_x, double frame_y)
   {
     return {FrameToNativeX(geometry, frame_x), FrameToNativeY(geometry, frame_y)};
   }
 
+  /**
+   * @brief 把原生传感器 x 坐标映射到帧内 x 坐标。
+   *        Map a native sensor x coordinate to the frame x coordinate.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param native_x 原生传感器 x 坐标，单位像素。
+   *                 Native sensor x coordinate in pixels.
+   * @return 帧内 x 坐标，单位像素。
+   *         Frame x coordinate in pixels.
+   */
   [[nodiscard]] static constexpr double NativeToFrameX(const FrameGeometry& geometry,
                                                        double native_x)
   {
@@ -360,6 +487,17 @@ class CameraTypes
                : oriented_x;
   }
 
+  /**
+   * @brief 把原生传感器 y 坐标映射到帧内 y 坐标。
+   *        Map a native sensor y coordinate to the frame y coordinate.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param native_y 原生传感器 y 坐标，单位像素。
+   *                 Native sensor y coordinate in pixels.
+   * @return 帧内 y 坐标，单位像素。
+   *         Frame y coordinate in pixels.
+   */
   [[nodiscard]] static constexpr double NativeToFrameY(const FrameGeometry& geometry,
                                                        double native_y)
   {
@@ -372,6 +510,19 @@ class CameraTypes
                : oriented_y;
   }
 
+  /**
+   * @brief 把原生传感器坐标映射到帧内坐标。
+   *        Map native sensor coordinates to frame coordinates.
+   *
+   * @param geometry 逐帧几何。
+   *                 Per-frame geometry.
+   * @param native_x 原生传感器 x 坐标，单位像素。
+   *                 Native sensor x coordinate in pixels.
+   * @param native_y 原生传感器 y 坐标，单位像素。
+   *                 Native sensor y coordinate in pixels.
+   * @return 帧内坐标 {x, y}，单位像素。
+   *         Frame coordinates {x, y} in pixels.
+   */
   [[nodiscard]] static constexpr std::array<double, 2> NativeToFrame(
       const FrameGeometry& geometry, double native_x, double native_y)
   {
@@ -381,25 +532,35 @@ class CameraTypes
   /**
    * @struct PnPDistCoeffs
    * @brief PnP 使用的固定尺寸畸变系数描述。
+   *        Fixed-size distortion coefficient description used by PnP.
    *
    * 该结构是纯静态数据，可在编译期生成，再由运行时封装成 `cv::Mat`。
+   * The struct is pure static data that can be produced at compile time and wrapped
+   * into a `cv::Mat` at runtime.
    */
   struct PnPDistCoeffs
   {
-    std::array<double, 8> values{};             ///< 当前 PnP 后端会消费的畸变系数。
-    uint8_t size{};                             ///< `values` 中有效系数个数。
-    bool uses_rational_polynomial_extension{};  ///< 是否命中 8 项 rational 扩展路径。
-    bool requires_undistort_first{};            ///< 当前模型是否应先去畸变再进入 PnP。
+    std::array<double, 8> values{};  ///< PnP 使用的畸变系数 Coefficients used by PnP
+    uint8_t size{};                  ///< `values` 的有效个数 Valid count in `values`
+    bool uses_rational_polynomial_extension{};  ///< 8 项 rational 扩展 8-term rational
+    bool requires_undistort_first{};  ///< 是否需先去畸变再进入 PnP Undistort before PnP
   };
 
   /**
    * @brief 按原生相机模型生成 PnP 所需的固定畸变系数描述。
+   *        Build the fixed distortion coefficient description PnP needs from the
+   *        native camera model.
    *
-   * @param calibration 运行期不可变的原生相机标定。
-   * @return 固定长度畸变系数和调用方处理建议。
+   * @param calibration 原生相机标定。
+   *                    Native camera calibration.
+   * @return 固定长度畸变系数和是否需先去畸变的标记。
+   *         Fixed-length coefficients and the flag for undistorting first.
    *
    * 直接支持 OpenCV 常用的 pinhole / rational 两类输入；其他模型在返回值中标记
    * `requires_undistort_first`，去畸变后按无畸变 pinhole 进入 PnP。
+   * The common OpenCV pinhole and rational inputs are supported directly; other
+   * models set `requires_undistort_first` and enter PnP as an undistorted pinhole
+   * after undistortion.
    */
   [[nodiscard]] static constexpr PnPDistCoeffs BuildPnPDistCoeffs(
       const CameraCalibration& calibration)
@@ -453,14 +614,23 @@ namespace CameraBaseDetail
 {
 /**
  * @brief 进程内共享所有权对象池。
+ *        In-process object pool with shared ownership.
  *
- * 底层 `MPMCObjectPool` 继续负责固定槽位的分配和回收；每个已借出槽位由一个
- * `SharedHandle` 独占或共享持有。复制 handle 增加原子引用计数，移动只转移本地所有权，
- * 最后一个 handle 析构时才把底层独占 pool handle 归还。句柄只暴露只读访问；生产者
- * 必须通过所属 pool 的 `GetWritable()` 取得独占可写指针。
+ * 底层 `MPMCObjectPool` 负责固定槽位的分配和回收；每个已借出槽位由一个
+ * `SharedHandle` 独占或共享持有。复制 handle 增加原子引用计数，移动转移本地所有权，
+ * 最后一个 handle 析构时归还底层独占 pool handle。句柄只提供只读访问；生产者
+ * 通过所属 pool 的 `GetWritable()` 取得独占可写指针。
+ * The underlying `MPMCObjectPool` allocates and recycles the fixed slots; each
+ * borrowed slot is held exclusively or shared by `SharedHandle`s. Copying a handle
+ * increments an atomic reference count, moving transfers local ownership, and the
+ * last handle to be destroyed returns the underlying exclusive pool handle. Handles
+ * give read-only access; the producer obtains the exclusive writable pointer from
+ * `GetWritable()` of the owning pool.
  *
  * @tparam Data 槽位中的对象类型。
+ *              Object type held in a slot.
  * @tparam SlotCount 固定槽位数。
+ *                   Number of fixed slots.
  */
 template <typename Data, std::size_t SlotCount>
 class SharedObjectPool
@@ -482,10 +652,15 @@ class SharedObjectPool
  public:
   /**
    * @brief 一个池槽位的可复制共享所有权句柄。
+   *        Copyable shared-ownership handle of one pool slot.
    *
-   * 句柄只在当前进程内有效。复制构造和复制赋值会增加引用计数；析构和 `Reset()` 会
-   * 减少引用计数。所有副本只读访问同一个 `Data`。调用方不得让 handle 的生命周期
-   * 超过所属 `SharedObjectPool`。
+   * 句柄只在当前进程内有效。复制构造和复制赋值增加引用计数；析构和 `Reset()` 减少
+   * 引用计数。所有副本只读访问同一个 `Data`。句柄的生命周期不超过所属
+   * `SharedObjectPool`。
+   * A handle is valid only within the current process. Copy construction and copy
+   * assignment increment the reference count; destruction and `Reset()` decrement
+   * it. All copies read the same `Data` read-only. A handle does not outlive its
+   * `SharedObjectPool`.
    */
   class SharedHandle
   {
@@ -529,8 +704,19 @@ class SharedObjectPool
 
     ~SharedHandle() { Reset(); }
 
+    /**
+     * @brief 句柄是否持有槽位。
+     *        Whether the handle holds a slot.
+     */
     [[nodiscard]] bool Valid() const noexcept { return pool_ != nullptr; }
 
+    /**
+     * @brief 返回只读数据指针。
+     *        Return the read-only data pointer.
+     *
+     * @return 句柄有效时返回槽位数据，否则返回 nullptr。
+     *         The slot data when the handle is valid, otherwise nullptr.
+     */
     [[nodiscard]] const Data* Get() const noexcept
     {
       return Valid() ? &pool_->Get(slot_index_, generation_) : nullptr;
@@ -546,14 +732,24 @@ class SharedObjectPool
 
     /**
      * @brief 返回当前引用计数的诊断快照。
+     *        Return a diagnostic snapshot of the current reference count.
      *
-     * 其他线程可在返回后立即复制或释放句柄，调用方不得用该值决定是否拥有独占访问权。
+     * 其他线程可在返回后立即复制或释放句柄，该值不用于判断是否拥有独占访问权。
+     * Other threads may copy or release handles right after the call returns, so
+     * the value does not indicate exclusive access.
+     *
+     * @return 引用计数；句柄无效或代次不匹配时为 0。
+     *         Reference count; 0 for an invalid handle or a generation mismatch.
      */
     [[nodiscard]] uint32_t UseCount() const noexcept
     {
       return Valid() ? pool_->UseCount(slot_index_, generation_) : 0U;
     }
 
+    /**
+     * @brief 释放当前持有的槽位引用，句柄变为无效。
+     *        Release the held slot reference and invalidate the handle.
+     */
     void Reset() noexcept
     {
       if (!Valid())
@@ -609,7 +805,13 @@ class SharedObjectPool
 
   /**
    * @brief 获取一个引用计数初值为一的共享句柄。
+   *        Acquire a shared handle with an initial reference count of one.
+   *
+   * @param handle 接收槽位的句柄，须为无效句柄，否则返回 `STATE_ERR`。
+   *               Handle that receives the slot; it must be invalid, otherwise
+   *               `STATE_ERR` is returned.
    * @return 成功返回 `OK`，没有空闲槽位返回底层 pool 的 `EMPTY`。
+   *         `OK` on success, the underlying pool's `EMPTY` when no slot is free.
    */
   [[nodiscard]] LibXR::ErrorCode Acquire(SharedHandle& handle)
   {
@@ -645,9 +847,17 @@ class SharedObjectPool
 
   /**
    * @brief 获取本池唯一所有者当前持有槽位的可写指针。
+   *        Get the writable pointer of the slot held by its sole owner in this pool.
    *
-   * 调用方必须独占访问 `handle` 对象，且在使用返回指针期间不得复制、移动或重置该
-   * handle。句柄无效、来自其他池、代次不匹配或已有共享副本时返回 nullptr。
+   * 调用方独占访问 `handle` 对象，且在使用返回指针期间不复制、移动或重置该 handle。
+   * The caller has exclusive access to the `handle` object and does not copy, move
+   * or reset it while using the returned pointer.
+   *
+   * @param handle 持有槽位的句柄。
+   *               Handle that holds the slot.
+   * @return 可写指针；句柄无效、来自其他池、代次不匹配或已有共享副本时返回 nullptr。
+   *         Writable pointer; nullptr when the handle is invalid, belongs to another
+   *         pool, has a generation mismatch or has shared copies.
    */
   [[nodiscard]] Data* GetWritable(SharedHandle& handle) noexcept
   {
@@ -665,6 +875,10 @@ class SharedObjectPool
     return &object_pool_.UnsafeAt(handle.slot_index_);
   }
 
+  /**
+   * @brief 返回当前空闲槽位数。
+   *        Return the number of free slots.
+   */
   [[nodiscard]] std::size_t Available() const noexcept
   {
     return object_pool_.EmptySize();
@@ -713,7 +927,7 @@ class SharedObjectPool
     UniqueHandle unique_handle = std::move(*owners_[slot_index]);
     owners_[slot_index].reset();
     // 先清空本槽 owner，再由 Reset() 把索引发布回 MPMC 队列。新的 Acquire()
-    // 在入队完成前不可能取得该索引，因此不会与这里并发改写同一个 optional。
+    // 在入队完成前取不到该索引，不会与这里并发改写同一个 optional。
     unique_handle.Reset();
   }
 
@@ -754,31 +968,42 @@ class SharedObjectPool
 /**
  * @class CameraBase
  * @brief 编译期绑定帧存储布局、运行期持有原生标定的相机生产者基类。
+ *        Camera producer base class bound to a frame storage layout at compile time
+ *        and holding the native calibration at runtime.
  *
  * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充本类两槽对象池中的
- * `ImageFrame`。`CommitImage()` 通过普通 topic 同步发布临时 `SharedFrame` 指针；
+ * `ImageFrame`。`CommitImage()` 通过普通 Topic 同步发布临时 `SharedFrame` 指针；
  * 订阅回调复制句柄后可把同一图像槽位交给异步线程，图像字节保持在原槽位。
+ * A concrete camera driver fills the `ImageFrame` of the two-slot object pool of
+ * this class. `CommitImage()` synchronously publishes a temporary `SharedFrame`
+ * pointer on an ordinary Topic; a subscriber callback copies the handle to pass the
+ * same image slot to an asynchronous thread, and the image bytes stay in the slot.
  *
  * @tparam FrameLayoutV 编译期图像存储容量和像素格式描述。
+ *                      Compile-time image storage capacity and pixel format.
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
 class CameraBase
 {
  public:
-  using Encoding = CameraTypes::Encoding;                    ///< 像素编码枚举的局部别名。
-  using DistortionModel = CameraTypes::DistortionModel;      ///< 畸变模型枚举的局部别名。
-  using FrameLayout = CameraTypes::FrameLayout;              ///< 编译期帧存储布局。
-  using CameraCalibration = CameraTypes::CameraCalibration;  ///< 原生相机标定。
-  using FrameGeometry = CameraTypes::FrameGeometry;          ///< 逐帧采样几何。
-  using ProfileId = CameraTypes::ProfileId;                  ///< 固定采样档位标识。
-  using CameraProfile = CameraTypes::CameraProfile;          ///< 可选档位描述。
-  using AppliedProfile = CameraTypes::AppliedProfile;        ///< 实际生效档位快照。
+  using Encoding = CameraTypes::Encoding;                ///< 像素编码 Pixel encoding
+  using DistortionModel = CameraTypes::DistortionModel;  ///< 畸变模型 Distortion model
+  using FrameLayout = CameraTypes::FrameLayout;          ///< 帧存储布局 Frame layout
+  using CameraCalibration =
+      CameraTypes::CameraCalibration;                  ///< 原生标定 Native calibration
+  using FrameGeometry = CameraTypes::FrameGeometry;    ///< 逐帧几何 Per-frame geometry
+  using ProfileId = CameraTypes::ProfileId;            ///< 档位标识 Profile identifier
+  using CameraProfile = CameraTypes::CameraProfile;    ///< 档位描述 Profile description
+  using AppliedProfile = CameraTypes::AppliedProfile;  ///< 生效档位快照 Applied profile
   /// 图像帧对象和像素负载的最小对齐字节数。
+  /// Minimum alignment in bytes of the frame object and pixel payload.
   static constexpr std::size_t image_alignment = 64;
 
   /// 整条视觉链共享的编译期图像存储布局。
+  /// Compile-time image storage layout shared by the whole vision chain.
   static inline constexpr FrameLayout frame_layout = FrameLayoutV;
-  /// 单帧图像负载字节数，等于 `FrameLayout::step * FrameLayout::height`。
+  /// 单帧图像负载字节数，等于 `step * height`。
+  /// Image payload bytes per frame, equal to `step * height`.
   static constexpr std::size_t image_bytes =
       static_cast<std::size_t>(frame_layout.step) *
       static_cast<std::size_t>(frame_layout.height);
@@ -786,53 +1011,76 @@ class CameraBase
   /**
    * @struct ImageFrame
    * @brief 固定尺寸的图像帧载荷。
+   *        Fixed-size image frame payload.
    *
-   * `data` 按 `frame_layout.encoding` 和逐帧 `geometry.step` 解释。生产者只能在当前
-   * writable slot 生命周期内写入该对象；调用 `CommitImage()` 后不得继续访问旧槽位。
-   * `timestamp_us` 必须保留源传感器或录制文件的采样时间，不能改写成主机到达、解码、
-   * 预处理或发布时间。实时采集应保留设备时钟的采样语义。CameraBase 不比较或重映射
-   * 时间域；重复、回退、回绕或复位由下游同步状态机处理。确定性回放必须保留原始
-   * 顺序和时间，包括原始重复值。
+   * `data` 按 `frame_layout.encoding` 和逐帧 `geometry.step` 解释，含每行
+   * padding。生产者在当前 可写槽位的生命周期内写入该对象；调用 `CommitImage()`
+   * 后改用下一次 `GetWritableImage()` 返回的指针。`timestamp_us`
+   * 保存源传感器或录制文件的采样 时间，实时采集保留设备时钟的采样语义。CameraBase
+   * 保存时间戳原值；重复、回退、
+   * 回绕或复位由下游同步状态机处理。确定性回放保持原始顺序和时间，包括原始重复值。
+   * `data` is interpreted by `frame_layout.encoding` and the per-frame
+   * `geometry.step` and includes row padding. The producer writes the object during the
+   * lifetime of the current writable slot and, after `CommitImage()`, uses the pointer
+   * returned by the next `GetWritableImage()`. `timestamp_us` holds the sampling time of
+   * the source sensor or recorded file; live capture keeps the sampling semantics of the
+   * device clock. CameraBase stores the timestamp as given; duplicates, regressions,
+   * wrap-around and resets are handled by the downstream synchronization state machine.
+   * Deterministic replay keeps the original order and times, including original
+   * duplicates.
    */
   struct alignas(image_alignment) ImageFrame
   {
     LibXR::MicrosecondTimestamp
-        timestamp_us;        ///< 传感器采样时间，单位微秒；不是主机到达或发布时间。
-    FrameGeometry geometry;  ///< 当前像素负载到原生传感器坐标系的映射。
-    alignas(image_alignment)
-        std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
+        timestamp_us;        ///< 传感器采样时间，微秒 Sensor sampling time, us
+    FrameGeometry geometry;  ///< 映射到原生坐标 Mapping to native coordinates
+    alignas(
+        image_alignment) std::array<uint8_t, image_bytes> data;  ///< 图像字节 Image bytes
   };
 
-  /// CameraBase 进程内图像池的固定槽位数，对应两帧背压窗口。
+  /// 进程内图像池的固定槽位数，对应两帧背压窗口。
+  /// Fixed slot count of the in-process image pool, a two-frame back-pressure window.
   static constexpr std::size_t image_slot_count = 2U;
   static_assert(
       image_slot_count == 2U,
       "CameraBase image pool capacity is part of the two-slot pipeline contract");
   /// CameraBase 自有的共享图像对象池。
+  /// Shared image object pool owned by CameraBase.
   using ImagePool = CameraBaseDetail::SharedObjectPool<ImageFrame, image_slot_count>;
-  /// 一个图像槽位的可复制进程内共享所有权句柄。
+  /// 图像槽位的可复制进程内共享所有权句柄。
+  /// Copyable in-process shared-ownership handle of an image slot.
   using SharedFrame = typename ImagePool::SharedHandle;
-  /// 普通 topic 只在同步回调期间借用该指针，不拥有 `SharedFrame`。
+  /// 图像 Topic 载荷，仅在同步回调期间借用，不拥有 `SharedFrame`。
+  /// Image Topic payload, borrowed only during the synchronous callback and not
+  /// owning the `SharedFrame`.
   using ImageTopicPayload = const SharedFrame*;
 
   /**
    * @struct ImuStamped
    * @brief 与图像同步搬运的位姿与惯导采样。
+   *        Pose and inertial sample carried in sync with images.
    *
-   * `CameraBase` 只定义并发布该载荷；同步、插值、时间域和坐标系由生成该数据的模块
-   * 保证。阶段包装可以把相机本地时间的 `ImageFrame` 与 MCU 时间的本对象关联起来，
-   * 两个 `timestamp_us` 不要求数值相等。
+   * `CameraBase` 定义并发布该载荷；同步、插值、时间域和坐标系由生成该数据的 Module
+   * 决定。阶段包装可以把相机本地时间的 `ImageFrame` 与 MCU 时间的本对象关联起来，
+   * 两个 `timestamp_us` 的数值可以不同。`translation_xyz` 在没有平移来源时置零。
+   * `CameraBase` defines and publishes the payload; synchronization, interpolation,
+   * time domain and coordinate frame are determined by the Module that produces the
+   * data. A stage wrapper can associate an `ImageFrame` in camera-local time with
+   * this object in MCU time, and the two `timestamp_us` values may differ.
+   * `translation_xyz` is zero when there is no translation source.
    */
   struct alignas(8) ImuStamped
   {
-    LibXR::MicrosecondTimestamp timestamp_us;      ///< 生成模块定义的权威时间，单位微秒。
-    std::array<float, 4> rotation_wxyz;            ///< 姿态四元数，顺序为 wxyz。
-    std::array<float, 3> translation_xyz;          ///< 平移，单位米；无平移来源时置零。
-    std::array<float, 3> angular_velocity_xyz;     ///< 角速度，单位 rad/s。
-    std::array<float, 3> linear_acceleration_xyz;  ///< 线加速度，单位 m/s^2。
+    LibXR::MicrosecondTimestamp
+        timestamp_us;  ///< 生成 Module 定义的时间，微秒 Producer-defined, us
+    std::array<float, 4> rotation_wxyz;         ///< 姿态四元数 wxyz Quaternion, wxyz
+    std::array<float, 3> translation_xyz;       ///< 平移，米 Translation, m
+    std::array<float, 3> angular_velocity_xyz;  ///< 角速度，rad/s Angular velocity, rad/s
+    std::array<float, 3>
+        linear_acceleration_xyz;  ///< 线加速度，m/s^2 Acceleration, m/s^2
   };
 
-  /// 时间戳必须保持 64-bit 标准布局。
+  // 时间戳保持 64-bit 标准布局。
   static_assert(sizeof(LibXR::MicrosecondTimestamp) == sizeof(uint64_t),
                 "CameraBase timestamp must stay 64-bit");
   static_assert(alignof(LibXR::MicrosecondTimestamp) == alignof(uint64_t),
@@ -880,13 +1128,26 @@ class CameraBase
 
   /**
    * @brief 构造相机基础对象并注册调试命令文件。
+   *        Construct the camera base object and register the debug command file.
+   *
+   * 构造时检查原生标定的合理性并取得第一个可写图像槽位。
+   * Construction checks the native calibration for plausibility and acquires the
+   * first writable image slot.
    *
    * @param ramfs 注册调试命令文件的 RamFS。
+   *              RamFS that receives the debug command file.
    * @param calibration 原生传感器坐标系下的不可变相机标定，按值持有。
-   * @param name 相机实例名，同时作为 RamFS 命令文件名；构造时复制并长期持有。
-   * @param image_topic_name 图像逻辑 topic 名称；构造时复制并长期持有。
-   * @param imu_topic_name 同步 IMU topic 名称；构造时复制并长期持有，`PublishImu()`
-   *        会发布到该 topic。
+   *                    Immutable camera calibration in native sensor coordinates,
+   *                    held by value.
+   * @param name 相机实例名，同时作为 RamFS 命令文件名；构造时复制并持有。
+   *             Camera instance name, also the RamFS command file name; copied and
+   *             held at construction.
+   * @param image_topic_name 图像 Topic 名称；构造时复制并持有。
+   *                         Image Topic name; copied and held at construction.
+   * @param imu_topic_name 同步 IMU Topic 名称；构造时复制并持有，`PublishImu()`
+   *                       发布到该 Topic。
+   *                       Synchronized IMU Topic name; copied and held at
+   *                       construction, and the Topic `PublishImu()` publishes to.
    */
   CameraBase(LibXR::RamFS& ramfs, CameraCalibration calibration,
              std::string_view name = "camera",
@@ -913,99 +1174,153 @@ class CameraBase
   CameraBase& operator=(CameraBase&&) = delete;
 
   /**
-   * @brief 仅提供多态类型完整性，不承担订阅注销或线程停止语义。
+   * @brief 虚析构函数，只销毁对象。
+   *        Virtual destructor that only destroys the object.
    *
-   * CameraBase、图像订阅和派生类工作线程按进程生命周期使用。析构不是并发边界，调用
-   * 方必须保证所有 `SharedFrame` 已经释放，不得依赖本析构等待回调或终止工作线程。
+   * CameraBase、图像订阅和派生类工作线程按进程生命周期使用。析构不是并发边界：
+   * 销毁前所有 `SharedFrame` 已经释放，回调注销和工作线程的停止在析构之外完成。
+   * CameraBase, image subscriptions and derived worker threads live for the whole
+   * process. Destruction is not a concurrency boundary: all `SharedFrame` handles
+   * are released before it, and callback unregistration and worker thread stopping
+   * happen outside the destructor.
    */
   virtual ~CameraBase() = default;
 
   /**
    * @brief 设置曝光参数。
+   *        Set the exposure.
    *
-   * @param exposure 具体单位由相机实现定义，HikCamera 使用微秒。
+   * @param exposure 曝光值，单位由相机实现定义，HikCamera 使用微秒。
+   *                 Exposure value; the unit is defined by the camera
+   *                 implementation, HikCamera uses microseconds.
    */
   virtual void SetExposure(double exposure) = 0;
 
   /**
    * @brief 设置增益参数。
+   *        Set the gain.
    *
-   * @param gain 具体单位和量纲由相机实现定义。
+   * @param gain 增益值，单位和量纲由相机实现定义。
+   *             Gain value; the unit and scale are defined by the camera
+   *             implementation.
    */
   virtual void SetGain(double gain) = 0;
 
   /**
    * @brief 返回本相机支持的固定采样档位表。
+   *        Return the table of fixed sampling profiles the camera supports.
    *
-   * 返回的 span 必须非空，底层存储及顺序在相机完整生命周期内保持稳定。首项描述相机
-   * 构造完成时的当前档位；每个 `id` 必须唯一，`trigger_period_us` 必须非零。
+   * 返回的 span 非空，底层存储及顺序在相机完整生命周期内保持稳定。首项描述相机
+   * 构造完成时的当前档位；每个 `id` 唯一，`trigger_period_us` 非零。
+   * The returned span is non-empty, and its storage and order stay stable for the
+   * whole camera lifetime. The first entry describes the profile in effect after
+   * construction; every `id` is unique and every `trigger_period_us` is non-zero.
+   *
+   * @return 档位表视图。
+   *         View of the profile table.
    */
   [[nodiscard]] virtual std::span<const CameraProfile> Profiles() const noexcept = 0;
 
   /**
    * @brief 阻塞切换到指定固定采样档位。
+   *        Switch to the given fixed sampling profile, blocking.
    *
-   * 本调用在相机侧切档尝试结束后返回。请求当前档位也必须返回 `OK` 并填写
-   * `applied`；不支持的档位返回 `NOT_SUPPORT`。任何失败都不得修改 `applied`，也不得
-   * 把部分配置暴露为成功结果。本接口不承诺失败后自动回滚原档或恢复采集。
+   * 本调用在相机侧切档尝试结束后返回。请求当前档位时返回 `OK` 并填写 `applied`；
+   * 不支持的档位返回 `NOT_SUPPORT`。失败时 `applied` 保持原值，部分配置不作为成功
+   * 结果返回。失败后的原档回滚和采集恢复由派生驱动与上层状态机处理。
+   * The call returns after the camera-side switch attempt ends. Requesting the
+   * current profile returns `OK` and fills `applied`; an unsupported profile returns
+   * `NOT_SUPPORT`. On failure `applied` keeps its value and a partial configuration
+   * is not reported as success. Rolling back to the previous profile and resuming
+   * capture after a failure are handled by the derived driver and the upper-level
+   * state machine.
    *
    * @param id 请求的档位标识。
+   *           Requested profile identifier.
    * @param applied 成功时写入实际生效的档位和逐帧几何；失败时保持原值。
+   *                On success receives the profile in effect and its per-frame
+   *                geometry; unchanged on failure.
    * @return 成功返回 `OK`，不支持返回 `NOT_SUPPORT`，其他失败返回对应错误码。
+   *         `OK` on success, `NOT_SUPPORT` for an unsupported profile, otherwise the
+   *         matching error code.
    */
   virtual LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) = 0;
 
   /**
    * @brief 返回本相机实例持有的原生标定。
+   *        Return the native calibration held by this camera instance.
    *
-   * 返回引用在相机对象完整生命周期内有效，调用方不得修改标定内容。
+   * 返回的常量引用在相机对象完整生命周期内有效。
+   * The returned const reference is valid for the whole lifetime of the camera
+   * object.
+   *
+   * @return 原生标定。
+   *         Native calibration.
    */
   const CameraCalibration& Calibration() const noexcept { return calibration_; }
 
   /**
    * @brief 返回相机实例名视图。
+   *        Return a view of the camera instance name.
    */
   std::string_view NameView() const { return name_.View(); }
 
   /**
    * @brief 返回以空字符结尾的相机实例名。
+   *        Return the null-terminated camera instance name.
    */
   const char* Name() const { return name_.CStr(); }
 
   /**
-   * @brief 返回图像逻辑 topic 名称视图。
+   * @brief 返回图像 Topic 名称视图。
+   *        Return a view of the image Topic name.
    */
   std::string_view ImageTopicNameView() const { return image_topic_name_.View(); }
 
   /**
-   * @brief 返回以空字符结尾的图像逻辑 topic 名称。
+   * @brief 返回以空字符结尾的图像 Topic 名称。
+   *        Return the null-terminated image Topic name.
    */
   const char* ImageTopicName() const { return image_topic_name_.CStr(); }
 
   /**
-   * @brief 返回同步 IMU topic 名称视图。
+   * @brief 返回同步 IMU Topic 名称视图。
+   *        Return a view of the synchronized IMU Topic name.
    */
   std::string_view ImuTopicNameView() const { return imu_topic_name_.View(); }
 
   /**
-   * @brief 返回以空字符结尾的同步 IMU topic 名称。
+   * @brief 返回以空字符结尾的同步 IMU Topic 名称。
+   *        Return the null-terminated synchronized IMU Topic name.
    */
   const char* ImuTopicName() const { return imu_topic_name_.CStr(); }
 
   /**
    * @brief 发布同步 IMU 数据。
+   *        Publish synchronized IMU data.
    *
-   * @param imu 标准布局 IMU 载荷，会按 `imu_topic_name` 发布。其时间戳由同步模块填写，
-   * CameraBase 不做转换或校验。
+   * @param imu 标准布局 IMU 载荷，发布到 `imu_topic_name`。时间戳由同步 Module
+   *            填写，CameraBase 按原值发布。
+   *            Standard-layout IMU payload published on `imu_topic_name`. The
+   *            timestamp is set by the synchronization Module and CameraBase
+   *            publishes it as given.
    */
   void PublishImu(ImuStamped imu) { imu_topic_.Publish(imu); }
 
   /**
    * @brief 获取生产者当前独占的可写图像槽位。
+   *        Get the writable image slot currently owned exclusively by the producer.
    *
-   * 若当前没有写槽位，本方法从两槽池中尝试获取一块。池中所有槽位仍被下游
+   * 当前没有可写槽位时，本方法从两槽池中获取一块。池中所有槽位仍被下游
    * `SharedFrame` 持有时返回 nullptr；下游释放任一槽位后，后续调用可再次成功。
-   * 本方法和 `CommitImage()` 只能由同一个采集线程调用。
+   * 本方法和 `CommitImage()` 由同一个采集线程调用。
+   * When no writable slot is held, the method takes one from the two-slot pool. It
+   * returns nullptr while downstream `SharedFrame`s hold all slots, and a later call
+   * succeeds after downstream releases a slot. This method and `CommitImage()` are
+   * called from the same capture thread.
+   *
+   * @return 可写图像指针；没有可用槽位时为 nullptr。
+   *         Writable image pointer; nullptr when no slot is available.
    */
   ImageFrame* GetWritableImage() noexcept
   {
@@ -1021,9 +1336,16 @@ class CameraBase
 
   /**
    * @brief 返回当前可立即获取的空闲图像槽位数。
+   *        Return the number of free image slots that can be acquired right now.
    *
-   * 当前生产者已经持有的可写槽位不计入该值。该值只用于监控，其他线程可能在返回后
-   * 立即释放槽位，因此调用方不得据此代替 `GetWritableImage()` 的结果。
+   * 生产者已经持有的可写槽位不计入该值。该值用于监控，其他线程可能在返回后
+   * 立即释放槽位，是否取得槽位以 `GetWritableImage()` 的结果为准。
+   * The writable slot already held by the producer is not counted. The value serves
+   * monitoring: other threads may release slots right after the call returns, and
+   * `GetWritableImage()` decides whether a slot is obtained.
+   *
+   * @return 空闲槽位数。
+   *         Number of free slots.
    */
   [[nodiscard]] std::size_t AvailableImageSlots() const noexcept
   {
@@ -1032,14 +1354,25 @@ class CameraBase
 
   /**
    * @brief 发布当前图像并放弃生产者所有权。
+   *        Publish the current image and give up producer ownership.
    *
-   * topic payload 是指向栈上 `SharedFrame` 的临时借用指针，只在 `Publish()` 的同步
-   * 回调期间有效。需要跨越回调继续使用图像的订阅者必须在回调内复制 `SharedFrame`，
-   * 再把该副本移动到稳定的异步工作槽位；不得保存裸指针，也不得用
-   * `SyncSubscriber` 或 `QueuedSubscriber` 承担图像所有权。回调应只做
-   * retain/enqueue，重处理留在工作线程。最后一个句柄析构后，槽位自动返回池中。
+   * Topic 载荷是指向栈上 `SharedFrame` 的临时借用指针，只在 `Publish()` 的同步
+   * 回调期间有效。需要在回调之后继续使用图像的订阅者在回调内复制 `SharedFrame`，
+   * 再把该副本移动到稳定的异步工作槽位；图像所有权通过回调建立，
+   * `SyncSubscriber` 和 `QueuedSubscriber` 可能错过或丢弃消息。回调只做
+   * 保留和入队，重处理在工作线程中进行。最后一个句柄析构后，槽位自动返回池中。
+   * The Topic payload is a temporary borrowed pointer to a `SharedFrame` on the
+   * stack, valid only during the synchronous callback of `Publish()`. A subscriber
+   * that uses the image after the callback copies the `SharedFrame` inside the
+   * callback and moves the copy to a stable asynchronous worker slot; ownership is
+   * established through the callback, because `SyncSubscriber` and
+   * `QueuedSubscriber` can miss or drop messages. The callback only retains and
+   * enqueues, and heavy processing runs on the worker thread. The slot returns to
+   * the pool after the last handle is destroyed.
    *
-   * @return 当前存在可写帧并完成同步发布时返回 true；没有可写帧时返回 false。
+   * @return 存在可写帧并完成同步发布时返回 true；没有可写帧时返回 false。
+   *         True when a writable frame existed and was published synchronously;
+   *         false when there is no writable frame.
    */
   bool CommitImage()
   {
@@ -1056,11 +1389,20 @@ class CameraBase
 
   /**
    * @brief RamFS 调试命令入口。
+   *        RamFS debug command entry.
+   *
+   * 不带参数时打印用法；`set_exposure <值>` 和 `set_gain <值>` 调用对应的设置函数。
+   * Without arguments it prints the usage; `set_exposure <value>` and
+   * `set_gain <value>` call the matching setter.
    *
    * @param self 当前相机实例。
+   *             Current camera instance.
    * @param argc 参数个数。
+   *             Argument count.
    * @param argv 参数数组，支持 `set_exposure` 和 `set_gain`。
+   *             Argument array; `set_exposure` and `set_gain` are supported.
    * @return 命令成功返回 0，未知命令返回 -1。
+   *         0 on success, -1 for an unknown command.
    */
   static int CommandFun(CameraBase* self, int argc, char** argv)
   {
@@ -1094,22 +1436,30 @@ class CameraBase
  protected:
   /**
    * @brief 丢弃生产者当前尚未提交的可写图像槽位。
+   *        Discard the writable image slot the producer holds and has not committed.
    *
-   * 采集运行期间只能由调用 `GetWritableImage()` 和 `CommitImage()` 的采集线程调用。
-   * 派生驱动停流并 join 采集线程后，控制线程可在确认没有并发图像槽访问时调用。已有
-   * 下游 `SharedFrame` 不受影响，本调用不等待其他槽位归还；当前没有可写槽位时为空
-   * 操作。后续 `GetWritableImage()` 会按需重新取槽。
+   * 采集运行期间由调用 `GetWritableImage()` 和 `CommitImage()` 的采集线程调用。
+   * 派生驱动停流并 join 采集线程后，控制线程可在没有并发图像槽访问时调用。已有
+   * 下游 `SharedFrame` 不受影响，本调用不等待其他槽位归还；当前没有可写槽位时无
+   * 操作。后续 `GetWritableImage()` 按需重新取槽。
+   * While capturing, it is called by the capture thread that calls
+   * `GetWritableImage()` and `CommitImage()`. After the derived driver stops the
+   * stream and joins the capture thread, the control thread can call it when no
+   * image slot is accessed concurrently. Existing downstream `SharedFrame`s are
+   * unaffected and the call does not wait for other slots to return; it does nothing
+   * when no writable slot is held. A later `GetWritableImage()` takes a slot again
+   * on demand.
    */
   void DiscardWritableImage() noexcept { writable_frame_.Reset(); }
 
  private:
-  const CameraCalibration calibration_;          ///< 构造期固定的原生相机标定。
-  LibXR::RuntimeStringView<> name_;              ///< 相机实例名和 RamFS 命令文件名。
-  LibXR::RuntimeStringView<> image_topic_name_;  ///< 图像逻辑 topic 名称。
-  LibXR::RuntimeStringView<> imu_topic_name_;  ///< `PublishImu()` 发布同步 IMU 的 topic。
-  LibXR::RamFS::File cmd_file_;                ///< 曝光/增益调试命令入口。
-  LibXR::Topic image_topic_;                   ///< 临时 `SharedFrame` 指针发布 topic。
-  LibXR::Topic imu_topic_;                     ///< 同步 IMU 发布 topic。
-  ImagePool image_pool_;                       ///< CameraBase 自有两槽图像池。
-  SharedFrame writable_frame_;                 ///< 生产者当前独占的可写槽位。
+  const CameraCalibration calibration_;  ///< 原生标定 Native calibration
+  LibXR::RuntimeStringView<> name_;      ///< 实例名和命令文件名 Name and command file
+  LibXR::RuntimeStringView<> image_topic_name_;  ///< 图像 Topic 名称 Image Topic name
+  LibXR::RuntimeStringView<> imu_topic_name_;    ///< IMU Topic 名称 IMU Topic name
+  LibXR::RamFS::File cmd_file_;  ///< 曝光/增益命令文件 Exposure/gain command file
+  LibXR::Topic image_topic_;     ///< 图像发布 Topic Image publication Topic
+  LibXR::Topic imu_topic_;       ///< IMU 发布 Topic IMU publication Topic
+  ImagePool image_pool_;         ///< 两槽图像池 Two-slot image pool
+  SharedFrame writable_frame_;   ///< 当前可写槽位 Current writable slot
 };
