@@ -93,12 +93,7 @@ The compile-time checks require non-zero width, height and `step`, a `step` that
 
 `CameraBase` checks the `CameraCalibration` for plausibility at construction, and a failed check triggers `REQUIRE`. The checks are: non-zero native size; a pinhole-shaped `camera_matrix` (`k[1]`, `k[3]`, `k[6]`, `k[7]` equal to 0 and `k[8]` equal to 1); positive `fx` and `fy` between 0.15 and 10 times the longer image side; `fx / fy` between 0.5 and 2; a principal point within the image extended by 25%; finite distortion coefficients with absolute values of at most 10.
 
-`CameraTypes::FrameGeometry` describes the mapping from one image frame to native sensor coordinates. It carries the frame size and step, the native ROI offset, the horizontal and vertical decimation factors `decimation_x` / `decimation_y`, the flip flags `FrameGeometryFlags` and the sampling phase. `FrameToNative()` and `NativeToFrame()` implement the coordinate mapping:
-
-```text
-oriented = reverse ? extent - 1 - frame : frame
-native = roi_offset + sample_phase + decimation * oriented
-```
+`CameraTypes::FrameGeometry` describes the mapping from one image frame to native sensor coordinates. It carries the frame size and step, the native ROI offset, the horizontal and vertical decimation factors `decimation_x` / `decimation_y`, the flip flags `FrameGeometryFlags` and the sampling phase. `FrameToNative()` and `NativeToFrame()` implement the coordinate mapping given in the code block above.
 
 `ValidateFrameGeometry()` checks that a `FrameGeometry` is consistent with the `FrameLayout` and the `CameraCalibration`: size and step equal to the layout, non-zero decimation factors, a finite sampling phase smaller than the decimation factor, valid flag bits, and a mapped extent inside the native calibration range. One `CameraCalibration` is kept per lens; ROI, decimation and flipping are expressed by the per-frame `FrameGeometry`.
 
@@ -168,18 +163,6 @@ CameraBase manages two in-process image slots with `LibXR::MPMCObjectPool<ImageF
 
 The `const SharedFrame*` is valid during the synchronous callback of the current `Publish()`. Copying a `SharedFrame` only increments the slot reference count and `ImageFrame::data` stays in place, so several Modules can hold the same frame on different threads. All copies read the same `ImageFrame` read-only; the writable pointer is granted only to the current producer, and the handle passed through the Topic is read-only. After `CommitImage()`, the producer uses the pointer returned by the next `GetWritableImage()`.
 
-```cpp
-using Camera = CameraBase<layout>;
-
-void OnImage(bool, Worker* worker, const Camera::SharedFrame* borrowed) {
-  if (borrowed == nullptr) {
-    return;
-  }
-  Camera::SharedFrame owned = *borrowed;
-  worker->Enqueue(std::move(owned));
-}
-```
-
 `CommitImage()` returns `true` when the current frame has been published synchronously and `false` when there is no writable frame. `GetWritableImage()` takes a slot from the pool when needed; it returns `nullptr` while both slots are held downstream, and succeeds again after downstream releases either slot. An image slot published without subscribers returns to the pool when the publication ends. After the derived driver stops the stream and joins the capture thread, it can call the protected `DiscardWritableImage()` to release an uncommitted slot; the call publishes no image and does not wait for slots held downstream.
 
 Image ownership is established inside the synchronous `Topic::Callback` by copying the `SharedFrame`. A `Topic::SyncSubscriber` can miss a publication and a `Topic::QueuedSubscriber` drops messages when its queue is full, while `Topic::Publish()` returns no per-subscriber result, so subscribers take image ownership through the callback.
@@ -230,8 +213,8 @@ CameraBase(LibXR::RamFS& ramfs, CameraCalibration calibration,
 RamFS 命令文件 `<name>`：
 
 ```text
-set_exposure <值>
-set_gain <值>
+set_exposure <value>
+set_gain <value>
 ```
 
 不带参数时打印用法。数值的单位和范围由具体相机实现定义，HikCamera 的曝光单位为微秒。
@@ -257,7 +240,7 @@ if (image == nullptr) {
 
 image->timestamp_us = timestamp;
 image->geometry = frame_geometry;
-// 写入 image->data
+// 写入 / write image->data
 
 if (!CommitImage()) {
   return;
@@ -281,42 +264,13 @@ Configuration parameters:
 - `image_topic_name`: name of the image Topic, default `"camera_image"`.
 - `imu_topic_name`: name of the Topic on which `PublishImu()` publishes `ImuStamped`, default `"camera_imu"`.
 
-RamFS command file `<name>`:
+RamFS command file `<name>`, with the commands in the code block above. Without arguments the file prints its usage. The unit and range of the values are defined by the concrete camera; the HikCamera exposure unit is microseconds.
 
-```text
-set_exposure <value>
-set_gain <value>
-```
-
-Without arguments the file prints its usage. The unit and range of the values are defined by the concrete camera; the HikCamera exposure unit is microseconds.
-
-A derived camera driver implements four pure virtual functions:
-
-```cpp
-void SetExposure(double exposure) override;
-void SetGain(double gain) override;
-std::span<const CameraProfile> Profiles() const noexcept override;
-LibXR::ErrorCode SwitchProfile(ProfileId id, AppliedProfile& applied) override;
-```
+A derived camera driver implements the four pure virtual functions shown above.
 
 The table returned by `Profiles()` is non-empty, and its address and order stay stable for the camera lifetime; the first entry is the profile in effect after construction, every `id` is unique and every trigger period is non-zero. `SwitchProfile()` is a blocking call: requesting the current profile returns `OK` and fills `applied`, an unsupported profile returns `NOT_SUPPORT`, and `applied` keeps its previous value on failure. The camera state after a failed switch is handled by the derived driver and the upper-level state machine.
 
-Capture code writes only the current writable slot:
-
-```cpp
-auto* image = GetWritableImage();
-if (image == nullptr) {
-  return;
-}
-
-image->timestamp_us = timestamp;
-image->geometry = frame_geometry;
-// write image->data
-
-if (!CommitImage()) {
-  return;
-}
-```
+Capture code writes only the current writable slot, as in the code block above.
 
 Other members: `AvailableImageSlots()` returns the number of free image slots for monitoring; `PublishImu()` publishes `ImuStamped`; `Calibration()`, `Name()`, `ImageTopicName()`, `ImuTopicName()` and the matching `*View()` functions return the values stored at construction.
 
