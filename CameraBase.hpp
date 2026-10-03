@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 相机基础类型、像素编码和图像/IMU 数据结构
+module_description: 相机共用类型与单进程内共享图像所有权的基类 / Common camera types and a base class for in-process shared image ownership
 depends: []
 standalone: false
 === END MANIFEST === */
@@ -73,8 +73,8 @@ class CameraTypes
    * @enum DistortionModel
    * @brief 相机畸变模型。
    *
-   * 枚举值用于解释 `CameraCalibration::distortion_coefficients` 的含义。当前 PnP
-   * 直通路径只消费 pinhole 常用模型，其它模型需要调用方先完成去畸变。
+   * 枚举值用于解释 `CameraCalibration::distortion_coefficients` 的含义。PnP 直通路径
+   * 消费 pinhole 常用模型，其它模型由调用方先完成去畸变。
    */
   enum class DistortionModel : uint8_t
   {
@@ -151,7 +151,7 @@ class CameraTypes
    * @brief 一帧图像相对原生传感器坐标系的采样关系。
    *
    * `roi_offset_*_native` 和 `sample_phase_*_native` 均使用原生像素中心坐标。
-   * 结构按值进入 `ImageFrame`，可安全跨线程和共享内存。
+   * 结构按值进入 `ImageFrame`，是标准布局、可平凡复制的类型。
    */
   struct FrameGeometry
   {
@@ -163,7 +163,7 @@ class CameraTypes
     uint16_t decimation_x{};         ///< 横向相邻帧像素对应的原生像素间距。
     uint16_t decimation_y{};         ///< 纵向相邻帧像素对应的原生像素间距。
     uint16_t flags{};                ///< `FrameGeometryFlags` 位集合。
-    uint16_t reserved{};             ///< ABI 保留字段，当前必须为 0。
+    uint16_t reserved{};             ///< ABI 保留字段，必须为 0。
     float sample_phase_x_native{};   ///< 第 0 列像素中心相对 ROI 起点的原生 x 相位。
     float sample_phase_y_native{};   ///< 第 0 行像素中心相对 ROI 起点的原生 y 相位。
   };
@@ -382,7 +382,7 @@ class CameraTypes
    * @struct PnPDistCoeffs
    * @brief PnP 使用的固定尺寸畸变系数描述。
    *
-   * @note 这里保持为纯静态数据，便于编译期生成，再由运行时封装成 `cv::Mat`。
+   * 该结构是纯静态数据，可在编译期生成，再由运行时封装成 `cv::Mat`。
    */
   struct PnPDistCoeffs
   {
@@ -398,8 +398,8 @@ class CameraTypes
    * @param calibration 运行期不可变的原生相机标定。
    * @return 固定长度畸变系数和调用方处理建议。
    *
-   * @note 当前只直接支持 OpenCV 常用 pinhole / rational 两类输入。
-   *       其他模型后续应先做去畸变，再按无畸变 pinhole 进入 PnP。
+   * 直接支持 OpenCV 常用的 pinhole / rational 两类输入；其他模型在返回值中标记
+   * `requires_undistort_first`，去畸变后按无畸变 pinhole 进入 PnP。
    */
   [[nodiscard]] static constexpr PnPDistCoeffs BuildPnPDistCoeffs(
       const CameraCalibration& calibration)
@@ -757,8 +757,7 @@ class SharedObjectPool
  *
  * `CameraBase` 定义相机类型和图像提交方式。具体相机驱动负责填充本类两槽对象池中的
  * `ImageFrame`。`CommitImage()` 通过普通 topic 同步发布临时 `SharedFrame` 指针；
- * 订阅回调复制句柄后可把同一图像槽位交给异步线程，不复制图像字节。
- * 本类不负责记录、标定、预览、图像同步或坐标系转换。
+ * 订阅回调复制句柄后可把同一图像槽位交给异步线程，图像字节保持在原槽位。
  *
  * @tparam FrameLayoutV 编译期图像存储容量和像素格式描述。
  */
@@ -804,7 +803,7 @@ class CameraBase
         std::array<uint8_t, image_bytes> data;  ///< 图像字节负载，含每行 padding。
   };
 
-  /// CameraBase 进程内图像池的固定槽位数，匹配当前流水线的两帧背压窗口。
+  /// CameraBase 进程内图像池的固定槽位数，对应两帧背压窗口。
   static constexpr std::size_t image_slot_count = 2U;
   static_assert(
       image_slot_count == 2U,
