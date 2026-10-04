@@ -11,6 +11,7 @@
 
 #include "CameraBase.hpp"
 #include "libxr.hpp"
+#include "ramfs.hpp"
 
 namespace
 {
@@ -49,12 +50,11 @@ constexpr Camera::FrameGeometry MakeNarrowGeometry()
 class TestCamera final : public Camera
 {
  public:
-  explicit TestCamera(LibXR::HardwareContainer& hw,
-                      std::string_view name = "camera_base_profile_test",
-                      std::string_view image_topic_name =
-                          "camera_base_profile_image_test",
-                      std::string_view imu_topic_name = "camera_base_profile_imu_test")
-      : Camera(hw, MakeCalibration(), name, image_topic_name, imu_topic_name)
+  explicit TestCamera(
+      LibXR::RamFS& ramfs, std::string_view name = "camera_base_profile_test",
+      std::string_view image_topic_name = "camera_base_profile_image_test",
+      std::string_view imu_topic_name = "camera_base_profile_imu_test")
+      : Camera(ramfs, MakeCalibration(), name, image_topic_name, imu_topic_name)
   {
   }
 
@@ -483,11 +483,10 @@ int main()
   TestMultipleCallbacksShareOneFrame();
 
   LibXR::RamFS ramfs;
-  LibXR::HardwareContainer hw(LibXR::Entry<LibXR::RamFS>{ramfs, {"ramfs"}});
   std::string name = "camera_base_profile_test";
   std::string image_topic_name = "camera_base_profile_image_test";
   std::string imu_topic_name = "camera_base_profile_imu_test";
-  TestCamera camera(hw, name, image_topic_name, imu_topic_name);
+  TestCamera camera(ramfs, name, image_topic_name, imu_topic_name);
   name = "modified_name";
   image_topic_name = "modified_image_topic";
   imu_topic_name = "modified_imu_topic";
