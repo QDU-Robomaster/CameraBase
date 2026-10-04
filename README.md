@@ -119,7 +119,7 @@ The compile-time checks require non-zero width, height and `step`, a `step` that
 
 ## 3. 图像发布与所有权 / Image Publication and Ownership
 
-CameraBase 用 `LibXR::MPMCObjectPool<ImageFrame>` 管理两个进程内图像槽。相机生产与发布图像的顺序为：
+CameraBase 有两个进程内图像槽。相机生产与发布图像的顺序为：
 
 1. 采集线程调用 `GetWritableImage()`，取得当前可写的 `ImageFrame*`。
 2. 相机写入 `timestamp_us`、`geometry` 和 `data`。
@@ -144,15 +144,15 @@ void OnImage(bool, Worker* worker, const Camera::SharedFrame* borrowed) {
 
 `CommitImage()` 返回 `true` 表示当前帧已完成同步发布，返回 `false` 表示没有可写帧。`GetWritableImage()` 在需要时从池中取槽；两个槽都被下游持有时返回 `nullptr`，下游释放任一槽位后再次调用即可取得。发布时没有订阅者的图像槽在发布结束后立即回到池中。派生驱动停流并等待采集线程退出后，可调用受保护的 `DiscardWritableImage()` 释放尚未提交的槽位，该调用不发布图像，也不等待下游持有的槽位。
 
-图像所有权在同步 `Topic::Callback` 内通过复制 `SharedFrame` 建立。`Topic::SyncSubscriber` 可能错过发布，`Topic::QueuedSubscriber` 在队列已满时丢弃消息，而 `Topic::Publish()` 不返回逐订阅者的接收结果，因此订阅者通过回调持有图像所有权。
-
-订阅回调只复制句柄并交给稳定的工作槽位；推理、输出整理和解码等处理在工作线程中异步执行。工作槽位拒绝接收时，回调中的副本随即析构。固定的两个图像槽构成有界背压：一个槽由采集线程写入，另一个槽由下游异步链路持有；等待、丢帧和计数策略由相机或订阅方模块定义。必须在原始图像发布前完成的采集侧预处理，在 `CommitImage()` 之前完成。
+订阅者在同步 `Topic::Callback` 内复制 `SharedFrame` 以取得图像所有权。订阅回调只复制句柄并交给稳定的工作槽位；推理、输出整理和解码等处理在工作线程中异步执行。必须在原始图像发布前完成的采集侧预处理，在 `CommitImage()` 之前完成。
 
 `GetWritableImage()` 与 `CommitImage()` 由同一个采集线程调用。图像 Topic 的回调在该线程内同步执行，该 Topic 只由这个采集线程发布。`SharedFrame` 可以复制后跨线程移动和析构；同一个句柄对象被多个线程访问时，由调用方负责同步。
 
-CameraBase、回调目标、槽位池和工作线程按进程生命周期存在，`SharedFrame` 的生命周期不超过所属的 CameraBase。CameraBase 的析构函数只销毁对象；销毁前所有 `SharedFrame` 已释放，回调注销和工作线程的停止在析构之外完成。`SharedFrame` 用于单进程内的共享所有权。
+`SharedFrame` 用于单进程内的共享所有权，其生命周期不超过所属的 CameraBase；CameraBase 销毁前，所有 `SharedFrame` 已释放。
 
-CameraBase manages two in-process image slots with `LibXR::MPMCObjectPool<ImageFrame>`. A camera produces and publishes an image in this order:
+对象池、背压和析构的实现细节见 [docs/internals.md](docs/internals.md)。
+
+CameraBase has two in-process image slots. A camera produces and publishes an image in this order:
 
 1. The capture thread calls `GetWritableImage()` and obtains the current writable `ImageFrame*`.
 2. The camera writes `timestamp_us`, `geometry` and `data`.
@@ -163,15 +163,15 @@ CameraBase manages two in-process image slots with `LibXR::MPMCObjectPool<ImageF
 
 The `const SharedFrame*` is valid during the synchronous callback of the current `Publish()`. Copying a `SharedFrame` only increments the slot reference count and `ImageFrame::data` stays in place, so several Modules can hold the same frame on different threads. All copies read the same `ImageFrame` read-only; the writable pointer is granted only to the current producer, and the handle passed through the Topic is read-only. After `CommitImage()`, the producer uses the pointer returned by the next `GetWritableImage()`.
 
-`CommitImage()` returns `true` when the current frame has been published synchronously and `false` when there is no writable frame. `GetWritableImage()` takes a slot from the pool when needed; it returns `nullptr` while both slots are held downstream, and succeeds again after downstream releases either slot. An image slot published without subscribers returns to the pool when the publication ends. After the derived driver stops the stream and joins the capture thread, it can call the protected `DiscardWritableImage()` to release an uncommitted slot; the call publishes no image and does not wait for slots held downstream.
+`CommitImage()` returns `true` when the current frame has been published synchronously and `false` when there is no writable frame. `GetWritableImage()` takes a slot from the pool when needed; it returns `nullptr` while both slots are held downstream, and succeeds again after downstream releases either slot. An image slot published without subscribers returns to the pool when the publication ends. After the derived driver stops the stream and waits for the capture thread to exit, it can call the protected `DiscardWritableImage()` to release an uncommitted slot; the call publishes no image and does not wait for slots held downstream.
 
-Image ownership is established inside the synchronous `Topic::Callback` by copying the `SharedFrame`. A `Topic::SyncSubscriber` can miss a publication and a `Topic::QueuedSubscriber` drops messages when its queue is full, while `Topic::Publish()` returns no per-subscriber result, so subscribers take image ownership through the callback.
-
-The subscription callback only copies the handle and hands it to a stable worker slot; inference, output assembly and decoding run asynchronously on the worker thread. When the worker slot rejects the handle, the copy in the callback is destroyed immediately. The two fixed image slots form a bounded back pressure: one slot is written by the capture thread and the other is held by the downstream asynchronous chain; waiting, frame dropping and counting policies are defined by the camera or the subscribing Module. Capture-side preprocessing that must happen before the raw image is published completes before `CommitImage()`.
+A subscriber takes image ownership by copying the `SharedFrame` inside the synchronous `Topic::Callback`. The subscription callback only copies the handle and hands it to a stable worker slot; inference, output assembly and decoding run asynchronously on the worker thread. Capture-side preprocessing that must happen before the raw image is published completes before `CommitImage()`.
 
 `GetWritableImage()` and `CommitImage()` are called from the same capture thread. Callbacks of the image Topic run synchronously on that thread, and only this capture thread publishes that Topic. A `SharedFrame` can be copied, moved across threads and destroyed there; access to one handle object from several threads must be synchronized by the caller.
 
-CameraBase, callback targets, the slot pool and worker threads live for the whole process, and a `SharedFrame` does not outlive its CameraBase. The CameraBase destructor only destroys the object; all `SharedFrame` handles are released before destruction, and unregistering callbacks and stopping worker threads happen outside the destructor. `SharedFrame` provides shared ownership within one process.
+`SharedFrame` provides shared ownership within one process and does not outlive its CameraBase; all `SharedFrame` handles are released before the CameraBase is destroyed.
+
+The implementation details of the object pool, the back pressure and the destruction are in [docs/internals.md](docs/internals.md).
 
 ## 4. 时间戳 / Timestamps
 
