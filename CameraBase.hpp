@@ -182,6 +182,13 @@ class CameraBase
    */
   virtual LibXR::ErrorCode ApplyView(const CameraTypes::FrameGeometry& geometry) = 0;
 
+  /**
+   * @brief 一帧图像发布之后在采集线程调用，默认什么都不做。回放驱动用它发布同步帧。
+   *        Called on the capture thread after a frame is published; does nothing by
+   *        default. The replay driver publishes its synced frame here.
+   */
+  virtual void OnPublished(const SharedFrame& frame) { UNUSED(frame); }
+
   /// 驱动构造完成、硬件就绪后调用 / Called by the driver once the hardware is ready.
   void StartCapture()
   {
@@ -258,6 +265,7 @@ class CameraBase
     ImageTopicPayload payload = &frame;
     topic_.Publish(payload);
     published_.fetch_add(1, std::memory_order_relaxed);
+    OnPublished(frame);
   }
 
   const CameraTypes::CameraCalibration calibration_;

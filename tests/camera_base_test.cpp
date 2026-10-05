@@ -43,6 +43,8 @@ class FakeCamera : public CameraBase
   void Stop() { StopCapture(); }
 
   std::atomic<uint32_t> grabs{0};
+  std::atomic<uint32_t> after_publish{0};
+  std::atomic<uint32_t> last_published_counter{0};
   std::vector<CameraTypes::FrameGeometry> applied;
 
  protected:
@@ -61,6 +63,13 @@ class FakeCamera : public CameraBase
     applied.push_back(geometry);
     return LibXR::ErrorCode::OK;
   }
+
+  void OnPublished(const SharedFrame& frame) override
+  {
+    Expect(frame.Valid(), "OnPublished receives the published frame");
+    last_published_counter.store(frame->frame_counter);
+    after_publish.fetch_add(1);
+  }
 };
 
 // 订阅者：在回调里复制句柄，可选择一直攥着不放。LibXR 的回调注册后不能注销，订阅者
@@ -69,7 +78,7 @@ struct Subscriber
 {
   std::mutex mutex;
   std::vector<SharedFrame> held;
-  bool keep = false;
+  std::atomic<bool> keep{false};
   std::atomic<uint32_t> received{0};
 
   explicit Subscriber(const char* topic_name)
@@ -130,6 +139,10 @@ void TestPublishStampsGeometryAndCalibration()
   Expect(frame->calibration == &camera.Calibration(),
          "calibration pointer is the camera's");
   camera.Stop();
+  // 每帧发布之后调用一次 OnPublished / OnPublished runs once after every publication.
+  Expect(camera.after_publish.load() == sub.received.load(), "OnPublished per frame");
+  Expect(camera.last_published_counter.load() == sub.Latest()->frame_counter,
+         "OnPublished sees the frame just published");
   sub.Clear();
 }
 
