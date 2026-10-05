@@ -167,9 +167,11 @@ class CameraBase
   }
 
   /**
-   * @brief 取一帧：写 `data`、`timestamp_us`、`frame_counter`。在采集线程调用。
+   * @brief 取一帧：写 `data`、`timestamp_us`、`frame_counter`。在采集线程调用；调用前
+   *        `geometry` 已填为当前视角，回放驱动可改写为录像里的几何。
    *        Grab one frame: write `data`, `timestamp_us` and `frame_counter`. Called on
-   *        the capture thread.
+   *        the capture thread; `geometry` already holds the current view, and a replay
+   *        driver may overwrite it with the recorded geometry.
    * @return 取到一帧返回 true；超时或出错返回 false。
    */
   virtual bool GrabFrame(ImageFrame& frame) = 0;
@@ -225,6 +227,8 @@ class CameraBase
         LibXR::Thread::Sleep(1);  // WAIT 策略 / WAIT policy
         continue;
       }
+      frame->geometry = geometry_;
+      frame->calibration = &calibration_;
       if (!GrabFrame(*frame))
       {
         grab_failed_.fetch_add(1, std::memory_order_relaxed);
@@ -250,8 +254,6 @@ class CameraBase
 
   void Publish()
   {
-    writing_->geometry = geometry_;
-    writing_->calibration = &calibration_;
     SharedFrame frame = std::move(writing_);
     ImageTopicPayload payload = &frame;
     topic_.Publish(payload);

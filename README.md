@@ -50,12 +50,12 @@ class MyCamera : public CameraBase
 };
 ```
 
-- `GrabFrame` 在采集线程调用，只写像素、时间戳和帧计数；超时或出错返回 false。
+- `GrabFrame` 在采集线程调用，只写像素、时间戳和帧计数；超时或出错返回 false。调用前 `geometry` 已填为当前视角，回放驱动按录像改写它。
 - `ApplyView` 调用时采集线程已停止。
 - 没有空槽时，`SlotPolicy::DROP`（实时相机）把这一帧取到临时缓冲后丢弃，帧计数随之跳号；`SlotPolicy::WAIT`（回放）等待空槽。
 - 驱动析构时先调用 `StopCapture`。
 
-- `GrabFrame` runs on the capture thread and writes only the pixels, timestamp and frame counter; it returns false on a timeout or an error.
+- `GrabFrame` runs on the capture thread and writes only the pixels, timestamp and frame counter; it returns false on a timeout or an error. `geometry` already holds the current view when it is called; a replay driver overwrites it with the recorded geometry.
 - The capture thread is stopped while `ApplyView` runs.
 - With no free slot, `SlotPolicy::DROP` (live cameras) grabs the frame into a scratch buffer and drops it, so the frame counter skips; `SlotPolicy::WAIT` (replay) waits for a slot.
 - A driver calls `StopCapture` first in its destructor.
