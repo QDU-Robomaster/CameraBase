@@ -8,10 +8,12 @@ standalone: false
 === END MANIFEST === */
 // clang-format on
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -115,8 +117,8 @@ class CameraBase
     {
       return LibXR::ErrorCode::OK;
     }
-    const CameraTypes::FrameGeometry& geometry =
-        view == View::WIDE ? WIDE_GEOMETRY : narrow_geometry_;
+    const CameraTypes::FrameGeometry geometry =
+        view == View::WIDE ? WIDE_GEOMETRY : NarrowGeometryNow();
     StopCapture();
     writing_.Reset();  // 写了一半的帧属于旧档位 / A half-written frame has the old view
     const LibXR::ErrorCode result = ApplyView(geometry);
@@ -126,16 +128,89 @@ class CameraBase
                    static_cast<int>(result));
       return result;
     }
-    view_ = view;
-    geometry_ = geometry;
+    {
+      std::lock_guard<std::mutex> lock(geometry_mutex_);
+      view_ = view;
+      geometry_ = geometry;
+    }
     StartCapture();
     return LibXR::ErrorCode::OK;
+  }
+
+  /**
+   * @brief 移动 NARROW 窗口，采集不停。不在 NARROW 时只记下位置，下次切到 NARROW 时使用。
+   *        Move the NARROW window without stopping capture. Outside NARROW only the
+   *        position is stored for the next switch to NARROW.
+   *
+   * 调用方须保证移动期间没有新帧曝光（外触发下先停触发，见 CameraFrameSync）：取图返回
+   * 时按当时的窗口标记几何，移动前曝光、移动后才返回的帧会被标成新窗口。
+   * The caller makes sure no frame is exposed while the window moves (stop the trigger
+   * first, see CameraFrameSync): a frame is stamped with the window current when its
+   * grab returns, so one exposed before the move but returned after it would be stamped
+   * with the new window.
+   *
+   * @return OK；驱动不支持时 NOT_SUPPORT，写入失败时 FAILED，两者都保持原窗口。
+   *         OK; NOT_SUPPORT when the driver cannot move the window and FAILED when the
+   *         write fails, both keeping the previous window.
+   */
+  LibXR::ErrorCode MoveNarrow(NarrowPosition narrow)
+  {
+    const CameraTypes::FrameGeometry geometry = NarrowGeometry(calibration_, narrow);
+    std::lock_guard<std::mutex> move_lock(move_mutex_);
+    View view;
+    {
+      std::lock_guard<std::mutex> lock(geometry_mutex_);
+      view = view_;
+      if (view != View::NARROW)
+      {
+        narrow_geometry_ = geometry;
+        return LibXR::ErrorCode::OK;
+      }
+      if (geometry == geometry_)
+      {
+        return LibXR::ErrorCode::OK;
+      }
+    }
+    const LibXR::ErrorCode result = ApplyOffset(geometry);
+    if (result != LibXR::ErrorCode::OK)
+    {
+      return result;
+    }
+    std::lock_guard<std::mutex> lock(geometry_mutex_);
+    narrow_geometry_ = geometry;
+    geometry_ = geometry;
+    return LibXR::ErrorCode::OK;
+  }
+
+  /// 让 NARROW 窗口居中于原生像素点（受传感器边界限制）/ NARROW position that centres
+  /// the window on a native pixel, limited by the sensor edges.
+  static NarrowPosition CenteredOn(const CameraTypes::CameraCalibration& calibration,
+                                   CameraTypes::Point2d native)
+  {
+    const auto ratio = [](double centre, uint32_t size, uint32_t frame)
+    {
+      return std::clamp((centre - frame / 2.0) / static_cast<double>(size - frame), 0.0,
+                        1.0);
+    };
+    return {ratio(native.x, calibration.native_width, CameraTypes::FRAME_WIDTH),
+            ratio(native.y, calibration.native_height, CameraTypes::FRAME_HEIGHT)};
+  }
+
+  /// 当前 NARROW 窗口 / The current NARROW window.
+  CameraTypes::FrameGeometry NarrowGeometryNow() const
+  {
+    std::lock_guard<std::mutex> lock(geometry_mutex_);
+    return narrow_geometry_;
   }
 
   /// 原生标定，相机存活期间地址不变 / Native calibration, stable for the camera lifetime.
   const CameraTypes::CameraCalibration& Calibration() const { return calibration_; }
   const std::string& Name() const { return name_; }
-  View CurrentView() const { return view_; }
+  View CurrentView() const
+  {
+    std::lock_guard<std::mutex> lock(geometry_mutex_);
+    return view_;
+  }
 
   /// 打印周期摘要 / Print the periodic summary.
   void OnMonitor()
@@ -167,11 +242,12 @@ class CameraBase
   }
 
   /**
-   * @brief 取一帧：写 `data`、`timestamp_us`、`frame_counter`。在采集线程调用；调用前
-   *        `geometry` 已填为当前视角，回放驱动可改写为录像里的几何。
+   * @brief 取一帧：写 `data`、`timestamp_us`、`frame_counter`。在采集线程调用。驱动可写
+   *        `geometry`（回放用录像里的几何，仿真用渲染时的窗口）；不写时按返回时的窗口标记。
    *        Grab one frame: write `data`, `timestamp_us` and `frame_counter`. Called on
-   *        the capture thread; `geometry` already holds the current view, and a replay
-   *        driver may overwrite it with the recorded geometry.
+   *        the capture thread. A driver may write `geometry` (replay: the recorded one,
+   *        simulation: the window at render time); otherwise the frame is stamped with
+   *        the window current at return.
    * @return 取到一帧返回 true；超时或出错返回 false。
    */
   virtual bool GrabFrame(ImageFrame& frame) = 0;
@@ -181,6 +257,19 @@ class CameraBase
    *        Reconfigure the hardware to the geometry. The capture thread is stopped.
    */
   virtual LibXR::ErrorCode ApplyView(const CameraTypes::FrameGeometry& geometry) = 0;
+
+  /**
+   * @brief 采集不停时只移动窗口偏移（同一尺寸、同一跳采），默认不支持。在 MoveNarrow 的
+   *        调用线程上调用，采集线程可能正阻塞在 GrabFrame 里。
+   *        Move only the window offset while capture runs (same size and decimation);
+   *        not supported by default. Called on MoveNarrow's thread while the capture
+   *        thread may be blocked in GrabFrame.
+   */
+  virtual LibXR::ErrorCode ApplyOffset(const CameraTypes::FrameGeometry& geometry)
+  {
+    UNUSED(geometry);
+    return LibXR::ErrorCode::NOT_SUPPORT;
+  }
 
   /**
    * @brief 一帧图像发布之后在采集线程调用，默认什么都不做。回放驱动用它发布同步帧。
@@ -209,10 +298,18 @@ class CameraBase
   /// 驱动用来判断是否应继续阻塞等待 / Lets a driver stop blocking waits.
   bool CaptureRunning() const { return running_.load(); }
 
-  /// 驱动初始启动时的几何（WIDE）/ Geometry the driver starts with (WIDE).
-  const CameraTypes::FrameGeometry& CurrentGeometry() const { return geometry_; }
+  /// 当前视角的几何 / Geometry of the current view.
+  CameraTypes::FrameGeometry CurrentGeometry() const
+  {
+    std::lock_guard<std::mutex> lock(geometry_mutex_);
+    return geometry_;
+  }
 
  private:
+  /// 取图前的占位几何（跳采 0 不是合法几何）/ Placeholder before a grab (decimation 0 is
+  /// not a valid geometry).
+  static constexpr CameraTypes::FrameGeometry UNSET_GEOMETRY{0, 0, 0};
+
   static CameraTypes::FrameGeometry NarrowGeometry(
       const CameraTypes::CameraCalibration& calibration, NarrowPosition narrow)
   {
@@ -234,12 +331,19 @@ class CameraBase
         LibXR::Thread::Sleep(1);  // WAIT 策略 / WAIT policy
         continue;
       }
-      frame->geometry = geometry_;
+      frame->geometry = UNSET_GEOMETRY;
       frame->calibration = &calibration_;
       if (!GrabFrame(*frame))
       {
         grab_failed_.fetch_add(1, std::memory_order_relaxed);
         continue;
+      }
+      // 驱动没写几何时按返回时的窗口标记：等待期间窗口可能移动过（见 MoveNarrow）。
+      // Unless the driver wrote the geometry, stamp the window current at return: the
+      // window may have moved while waiting (see MoveNarrow).
+      if (frame->geometry == UNSET_GEOMETRY)
+      {
+        frame->geometry = CurrentGeometry();
       }
       if (frame == &scratch_)
       {
@@ -269,7 +373,9 @@ class CameraBase
   }
 
   const CameraTypes::CameraCalibration calibration_;
-  const CameraTypes::FrameGeometry narrow_geometry_;
+  mutable std::mutex geometry_mutex_;  ///< 保护视角与几何 / Guards the view and geometry
+  std::mutex move_mutex_;              ///< 串行化 MoveNarrow / Serialises MoveNarrow
+  CameraTypes::FrameGeometry narrow_geometry_;
   const std::string name_;
   const std::string topic_name_;
   const SlotPolicy policy_;

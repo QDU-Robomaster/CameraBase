@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -41,15 +42,27 @@ class FakeCamera : public CameraBase
 
   /// 先停采集，再让订阅者放掉帧，最后析构相机（池须比句柄活得久）。
   void Stop() { StopCapture(); }
+  CameraTypes::FrameGeometry Geometry() const { return CurrentGeometry(); }
 
   std::atomic<uint32_t> grabs{0};
   std::atomic<uint32_t> after_publish{0};
   std::atomic<uint32_t> last_published_counter{0};
   std::vector<CameraTypes::FrameGeometry> applied;
+  std::vector<CameraTypes::FrameGeometry> moved;
+  /// 模拟外触发停下：取图阻塞在 GrabFrame 里 / Simulates a stopped trigger: the grab
+  /// blocks inside GrabFrame.
+  std::atomic<bool> paused{false};
+  std::atomic<bool> waiting{false};
 
  protected:
   bool GrabFrame(ImageFrame& frame) override
   {
+    while (paused.load() && CaptureRunning())
+    {
+      waiting.store(true);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    waiting.store(false);
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
     const uint32_t n = grabs.fetch_add(1);
     frame.frame_counter = n;
@@ -61,6 +74,12 @@ class FakeCamera : public CameraBase
   LibXR::ErrorCode ApplyView(const CameraTypes::FrameGeometry& geometry) override
   {
     applied.push_back(geometry);
+    return LibXR::ErrorCode::OK;
+  }
+
+  LibXR::ErrorCode ApplyOffset(const CameraTypes::FrameGeometry& geometry) override
+  {
+    moved.push_back(geometry);
     return LibXR::ErrorCode::OK;
   }
 
@@ -163,6 +182,44 @@ void TestSwitchView()
   sub.Clear();
 }
 
+void TestMoveNarrow()
+{
+  FakeCamera camera("cam_m", CameraBase::SlotPolicy::DROP);
+  Subscriber& sub = Subscriber::Make("cam_m_image");
+  WaitFor(sub.received, 3);
+  // WIDE 下只记下位置，不动硬件 / In WIDE only the position is stored.
+  Expect(camera.MoveNarrow({0.0, 0.0}) == LibXR::ErrorCode::OK, "move in WIDE ok");
+  Expect(camera.moved.empty(), "no hardware move in WIDE");
+  const CameraTypes::FrameGeometry corner{0, 0, 1};
+  Expect(camera.NarrowGeometryNow() == corner, "stored NARROW window");
+  Expect(camera.SwitchView(View::NARROW) == LibXR::ErrorCode::OK, "switch ok");
+  Expect(camera.applied.back() == corner, "switch uses the stored window");
+  // 取图阻塞时移动窗口：恢复后发布的帧都是新窗口 / Move while the grab is blocked:
+  // every frame published after resuming carries the new window.
+  camera.paused.store(true);
+  while (!camera.waiting.load())
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  const uint32_t before = sub.received.load();
+  Expect(camera.MoveNarrow({1.0, 1.0}) == LibXR::ErrorCode::OK, "move in NARROW ok");
+  const CameraTypes::FrameGeometry far{800, 568, 1};
+  Expect(camera.moved.size() == 1 && camera.moved[0] == far, "offset written");
+  Expect(camera.Geometry() == far, "current geometry follows the move");
+  camera.paused.store(false);
+  WaitFor(sub.received, before + 3);
+  Expect(sub.Latest()->geometry == far, "frames after the move carry the new window");
+  Expect(camera.MoveNarrow({1.0, 1.0}) == LibXR::ErrorCode::OK, "same window is a no-op");
+  Expect(camera.moved.size() == 1, "no hardware call for the same window");
+  camera.Stop();
+  sub.Clear();
+  // 原生 (720, 540) 居中 / Native (720, 540) is the centre.
+  const NarrowPosition centre = CameraBase::CenteredOn(CALIBRATION, {720.0, 540.0});
+  Expect(std::abs(centre.u - 0.5) < 1e-9 && std::abs(centre.v - 0.5) < 1e-9, "centred");
+  const NarrowPosition edge = CameraBase::CenteredOn(CALIBRATION, {-50.0, 2000.0});
+  Expect(edge.u == 0.0 && edge.v == 1.0, "clamped to the sensor");
+}
+
 void TestDropPolicyKeepsGrabbing()
 {
   FakeCamera camera("cam_c", CameraBase::SlotPolicy::DROP);
@@ -210,6 +267,7 @@ int main()
   LibXR::PlatformInit();
   TestPublishStampsGeometryAndCalibration();
   TestSwitchView();
+  TestMoveNarrow();
   TestDropPolicyKeepsGrabbing();
   TestWaitPolicyStopsGrabbing();
   std::puts("camera_base_test passed");
