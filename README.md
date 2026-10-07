@@ -29,6 +29,10 @@ The whole system uses one frame: 640×512 BayerRG8 with R at `(0, 0)` and 640 by
 
 `u` and `v` range over 0–1; (0.5, 0.5) is centred and (0, 0) and (1, 1) are opposite corners; the window origin is aligned to 4 px. `SwitchView` blocks: it stops the capture thread, drops a half-written frame, calls the driver's `ApplyView` and resumes capture. Frames published afterwards carry the new geometry. The camera starts in WIDE.
 
+`MoveNarrow(narrow)` 在采集不停的情况下移动 NARROW 窗口，由驱动的 `ApplyOffset` 只改偏移；驱动不支持时返回 `NOT_SUPPORT`，写入失败时返回 `FAILED`，两者都保持原窗口。不在 NARROW 时只记下位置，下次 `SwitchView(View::NARROW)` 使用。驱动不写 `geometry` 时，帧按取图返回时的窗口标记，所以调用方须保证移动期间没有帧曝光；外触发下由 CameraFrameSync 先停触发。`CenteredOn(calibration, native)` 给出让窗口居中于某个原生像素的位置，受传感器边界限制。
+
+`MoveNarrow(narrow)` moves the NARROW window while capture keeps running; the driver's `ApplyOffset` changes only the offset. It returns `NOT_SUPPORT` when the driver cannot move the window and `FAILED` when the write fails, both keeping the previous window. Outside NARROW only the position is stored for the next `SwitchView(View::NARROW)`. Unless the driver writes `geometry`, a frame is stamped with the window current when its grab returns, so the caller makes sure no frame is exposed during the move; with an external trigger CameraFrameSync stops the trigger first. `CenteredOn(calibration, native)` gives the position that centres the window on a native pixel, limited by the sensor edges.
+
 ## 4. 编写驱动 / Writing a Driver
 
 ```cpp
@@ -47,17 +51,21 @@ class MyCamera : public CameraBase
  protected:
   bool GrabFrame(ImageFrame& frame) override;  // 写 data、timestamp_us、frame_counter
   LibXR::ErrorCode ApplyView(const CameraTypes::FrameGeometry& geometry) override;
+  // 可选 / Optional
+  LibXR::ErrorCode ApplyOffset(const CameraTypes::FrameGeometry& geometry) override;
 };
 ```
 
-- `GrabFrame` 在采集线程调用，只写像素、时间戳和帧计数；超时或出错返回 false。调用前 `geometry` 已填为当前视角，回放驱动按录像改写它。
+- `GrabFrame` 在采集线程调用，写像素、时间戳和帧计数；超时或出错返回 false。驱动可写 `geometry`（回放用录像里的几何，仿真用渲染时的窗口），不写时按返回时的窗口标记。
 - `ApplyView` 调用时采集线程已停止。
+- `ApplyOffset` 默认返回 `NOT_SUPPORT`。实现时在 `MoveNarrow` 的调用线程上执行，采集线程可能正阻塞在 `GrabFrame` 里。
 - 没有空槽时，`SlotPolicy::DROP`（实时相机）把这一帧取到临时缓冲后丢弃，帧计数随之跳号；`SlotPolicy::WAIT`（回放）等待空槽。
 - 每帧发布之后在采集线程调用 `OnPublished(frame)`，默认为空；回放驱动在这里发布同步帧。
 - 驱动析构时先调用 `StopCapture`。
 
-- `GrabFrame` runs on the capture thread and writes only the pixels, timestamp and frame counter; it returns false on a timeout or an error. `geometry` already holds the current view when it is called; a replay driver overwrites it with the recorded geometry.
+- `GrabFrame` runs on the capture thread and writes the pixels, timestamp and frame counter; it returns false on a timeout or an error. A driver may write `geometry` (replay: the recorded one, simulation: the window at render time); otherwise the frame is stamped with the window current at return.
 - The capture thread is stopped while `ApplyView` runs.
+- `ApplyOffset` returns `NOT_SUPPORT` by default. An implementation runs on the thread that calls `MoveNarrow`, while the capture thread may be blocked in `GrabFrame`.
 - With no free slot, `SlotPolicy::DROP` (live cameras) grabs the frame into a scratch buffer and drops it, so the frame counter skips; `SlotPolicy::WAIT` (replay) waits for a slot.
 - `OnPublished(frame)` runs on the capture thread after each publication and is empty by default; the replay driver publishes its synced frame there.
 - A driver calls `StopCapture` first in its destructor.
